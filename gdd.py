@@ -5,47 +5,53 @@ import requests
 import csv
 from datetime import datetime, timedelta, timezone
 
-
 # --- Helper Functions for Logging ---
 def log(message):
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
     print(f"[{now}] {message}")
 
-
 def log_debug(message):
     if DEBUG:
         log("[DEBUG] " + message)
 
+# === Function to Reload Configuration from config.ini ===
+def reload_config():
+    global DB_FILENAME, RETRY_SLEEP_TIME, RATE_LIMIT_DELAY, API_CALL_DELAY, DEBUG, RECALC_INTERVAL
+    global MAC_ADDRESS, API_KEY, APPLICATION_KEY, BACKUP_MAC_ADDRESS, URL_TEMPLATE, START_DATE, CURRENT_DATE
+    global OPENMETEO_LAT, OPENMETEO_LON
 
-# === Load Configuration from External File ===
-config = configparser.ConfigParser()
-config.read('config.ini')
+    config = configparser.ConfigParser()
+    config.read('config.ini')
 
-# Global configuration
-DB_FILENAME = config.get('global', 'db_filename')
-RETRY_SLEEP_TIME = config.getfloat('global', 'retry_sleep_time')
-RATE_LIMIT_DELAY = config.getfloat('global', 'rate_limit_delay')
-API_CALL_DELAY = config.getfloat('global', 'api_call_delay', fallback=1.0)
-DEBUG = config.getboolean('global', 'debug')
+    # Global configuration
+    DB_FILENAME = config.get('global', 'db_filename')
+    RETRY_SLEEP_TIME = config.getfloat('global', 'retry_sleep_time')
+    RATE_LIMIT_DELAY = config.getfloat('global', 'rate_limit_delay')
+    API_CALL_DELAY = config.getfloat('global', 'api_call_delay', fallback=1.0)
+    DEBUG = config.getboolean('global', 'debug')
+    RECALC_INTERVAL = config.getint('global', 'recalc_interval', fallback=100)
 
-# Primary weather station configuration
-MAC_ADDRESS = config.get('primary', 'mac_address')
-API_KEY = config.get('primary', 'api_key')
-APPLICATION_KEY = config.get('primary', 'application_key')
+    # Primary weather station configuration
+    MAC_ADDRESS = config.get('primary', 'mac_address')
+    API_KEY = config.get('primary', 'api_key')
+    APPLICATION_KEY = config.get('primary', 'application_key')
 
-# Backup weather station configuration
-BACKUP_MAC_ADDRESS = config.get('backup', 'mac_address')
+    # Backup weather station configuration
+    BACKUP_MAC_ADDRESS = config.get('backup', 'mac_address')
 
-# API endpoint template for Ambient Weather
-URL_TEMPLATE = config.get('api', 'url_template')
+    # API endpoint template for Ambient Weather
+    URL_TEMPLATE = config.get('api', 'url_template')
 
-# Date configuration
-START_DATE = datetime.strptime(config.get('date', 'start_date'), "%Y-%m-%d")
-CURRENT_DATE = datetime.now(timezone.utc).date()
+    # Date configuration
+    START_DATE = datetime.strptime(config.get('date', 'start_date'), "%Y-%m-%d")
+    CURRENT_DATE = datetime.now(timezone.utc).date()
 
-# Open-Meteo configuration (for fallback)
-OPENMETEO_LAT = config.getfloat('openmeteo', 'latitude')
-OPENMETEO_LON = config.getfloat('openmeteo', 'longitude')
+    # Open-Meteo configuration (for fallback)
+    OPENMETEO_LAT = config.getfloat('openmeteo', 'latitude')
+    OPENMETEO_LON = config.getfloat('openmeteo', 'longitude')
+
+# === Initial Config Load ===
+reload_config()
 
 # === Fields to Store (Order Matters) ===
 fields_order = [
@@ -130,12 +136,66 @@ with open("grapevine_gdd.csv", "r", newline='') as csvfile:
         """, (variety, heat_summation))
 conn.commit()
 
+# === Function: Recalculate Cumulative, Hourly, and Daily GDD ===
+def recalcGDD():
+    log("Recalculating cumulative GDD using incremental updates...")
+    # Get all distinct years present in the readings table.
+    cursor.execute("SELECT DISTINCT substr(date, 1, 4) as year FROM readings ORDER BY year ASC")
+    years = [row[0] for row in cursor.fetchall()]
+
+    for year in years:
+        # Try to get the last calculated cumulative GDD for this year.
+        cursor.execute(
+            "SELECT MAX(dateutc), gdd FROM readings WHERE substr(date, 1, 4)=? AND gdd>0",
+            (year,)
+        )
+        result = cursor.fetchone()
+        if result[0] is not None:
+            last_dateutc = result[0]
+            cumulative_gdd = result[1]
+            log(f"For year {year}, starting incremental recalculation from dateutc {last_dateutc} with cumulative GDD {cumulative_gdd:.3f}.")
+            # Process only rows after the last recalculated timestamp.
+            cursor.execute(
+                "SELECT dateutc, tempf, date FROM readings WHERE substr(date, 1, 4)=? AND dateutc > ? ORDER BY dateutc ASC",
+                (year, last_dateutc)
+            )
+        else:
+            # No previous GDD value exists for this year; recalc from the beginning.
+            cumulative_gdd = 0
+            log(f"For year {year}, no previous GDD found. Recalculating from start.")
+            cursor.execute(
+                "SELECT dateutc, tempf, date FROM readings WHERE substr(date, 1, 4)=? ORDER BY dateutc ASC",
+                (year,)
+            )
+
+        rows = cursor.fetchall()
+        for dateutc, tempf, date_str in rows:
+            if tempf is None:
+                continue
+            try:
+                val = float(tempf)
+            except Exception as e:
+                log(f"Skipping record {dateutc} due to invalid tempf: {tempf}")
+                continue
+            # Convert temperature from Fahrenheit to Celsius.
+            temp_c = (val - 32) * 5 / 9
+            # Calculate the increment (based on a 5-minute period: 288 intervals per day)
+            inc = max(0, (temp_c - base_temp_C)) / 288
+            cumulative_gdd += inc
+            cursor.execute("UPDATE readings SET gdd = ? WHERE dateutc = ?", (cumulative_gdd, dateutc))
+    conn.commit()
+    log("Cumulative GDD recalculation complete.")
+
 
 # === Fetch Data from Ambient Weather API ===
 def fetch_day_data(mac_address, end_date):
     """
     Fetch data for a given day using Ambient Weather’s API.
     Sleeps for API_CALL_DELAY seconds before each call.
+
+    If a 404 (Not Found) is returned, or a 401/403 is returned, the function returns None.
+    For 503 errors with a Retry-After > 30 sec, returns None.
+    Otherwise, returns the JSON response.
     """
     url = URL_TEMPLATE.format(
         mac_address=mac_address,
@@ -145,14 +205,19 @@ def fetch_day_data(mac_address, end_date):
     )
     log(f"Calling API URL: {url}")
     while True:
-        log_debug(f"Sleeping for RATE_LIMIT_DELAY of {RATE_LIMIT_DELAY} seconds before API call.")
-        time.sleep(RATE_LIMIT_DELAY)
+        log_debug(f"Sleeping for API_CALL_DELAY of {API_CALL_DELAY} seconds before API call.")
+        time.sleep(API_CALL_DELAY)
         try:
             response = requests.get(url, timeout=10)
         except Exception as ex:
             log(f"Request error for URL {url}: {ex}. Retrying in {RETRY_SLEEP_TIME} seconds...")
             time.sleep(RETRY_SLEEP_TIME)
             continue
+
+        # Handle 404 Not Found
+        if response.status_code == 404:
+            log(f"HTTP error 404 for URL {url}: Not Found. No data available.")
+            return None
 
         if response.status_code in [401, 403]:
             log(f"HTTP error {response.status_code} for URL {url}: Unauthorized or forbidden. Not retrying.")
@@ -202,7 +267,6 @@ def fetch_day_data(mac_address, end_date):
 
         return response.json()
 
-
 # === Fetch Data from Open-Meteo API as Fallback ===
 def fetch_openmeteo_data(day_str):
     """
@@ -243,7 +307,6 @@ def fetch_openmeteo_data(day_str):
     if responses:
         response = responses[0]
         hourly = response.Hourly()
-        # Create a pandas date range from the API’s timestamps
         import pandas as pd
         time_range = pd.date_range(
             start=pd.to_datetime(hourly.Time(), unit="s", utc=True),
@@ -251,7 +314,6 @@ def fetch_openmeteo_data(day_str):
             freq=pd.Timedelta(seconds=hourly.Interval()),
             inclusive="left"
         )
-        # Get hourly temperature values
         temp_values = hourly.Variables(0).ValuesAsNumpy()
         df = pd.DataFrame({"date": time_range, "tempf": temp_values})
         return df
@@ -259,11 +321,9 @@ def fetch_openmeteo_data(day_str):
         log("No Open-Meteo data received.")
         return None
 
-
 # === Base Temperatures for GDD Calculations ===
 base_temp_C = 10  # For 5-minute cumulative GDD (°C)
 base_temp_F = 50  # For hourly/daily calculations (°F)
-
 
 # === Gap Filling via Interpolation Function ===
 def fill_missing_data_by_gap(day_str):
@@ -272,7 +332,16 @@ def fill_missing_data_by_gap(day_str):
     If the gap between two rows exceeds 300 seconds, linearly interpolate missing intervals.
     Interpolated tempf values are rounded to one decimal.
     Inserted rows get is_generated = 1 and mac_source = "INTERP".
+    Additionally, fill gaps from the beginning of the day (00:00) to the first reading
+    and from the last reading to the expected last reading time (23:55).
     """
+    # Calculate expected start and end timestamps for the day.
+    dt_day = datetime.strptime(day_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    expected_start = int(dt_day.timestamp())
+    # Expected last reading is at 23:55 (287 intervals of 300 sec after 00:00)
+    expected_end = expected_start + (287 * 300)
+
+    # Get all existing rows for the day.
     cursor.execute(
         "SELECT dateutc, tempf FROM readings WHERE substr(date, 1, 10)=? ORDER BY dateutc ASC",
         (day_str,)
@@ -281,6 +350,27 @@ def fill_missing_data_by_gap(day_str):
     if not rows:
         log(f"No readings found for {day_str} to interpolate.")
         return
+
+    # If the first reading is after expected_start, fill the gap at the beginning.
+    first_ts, first_temp = rows[0]
+    if first_ts > expected_start:
+        gap = first_ts - expected_start
+        missing_intervals = gap // 300  # number of intervals missing before first reading
+        for j in range(1, missing_intervals + 1):
+            new_ts = expected_start + j * 300
+            # Use first_temp for extrapolation.
+            interp_temp = first_temp
+            dt_new = datetime.fromtimestamp(new_ts, tz=timezone.utc)
+            new_date_str = dt_new.isoformat() + "Z"
+            sql = """
+                INSERT OR REPLACE INTO readings
+                (dateutc, date, tempf, gdd, gdd_hourly, gdd_daily, is_generated, mac_source)
+                VALUES (?, ?, ?, 0, 0, 0, 1, "INTERP")
+            """
+            cursor.execute(sql, (new_ts, new_date_str, round(interp_temp, 1)))
+            log(f"Interpolated (start) reading for {new_date_str}: tempf {round(interp_temp, 1)}")
+
+    # Interpolate between existing rows.
     for i in range(len(rows) - 1):
         t1, temp1 = rows[i]
         t2, temp2 = rows[i + 1]
@@ -294,23 +384,47 @@ def fill_missing_data_by_gap(day_str):
                 fraction = j / (missing_intervals + 1)
                 interp_temp = temp1 + fraction * (temp2 - temp1)
                 interp_temp = round(interp_temp, 1)
-                dt = datetime.fromtimestamp(new_ts, tz=timezone.utc)
-                new_date_str = dt.isoformat() + "Z"
+                dt_new = datetime.fromtimestamp(new_ts, tz=timezone.utc)
+                new_date_str = dt_new.isoformat() + "Z"
                 sql = """
                     INSERT OR REPLACE INTO readings
                     (dateutc, date, tempf, gdd, gdd_hourly, gdd_daily, is_generated, mac_source)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, 0, 0, 0, 1, "INTERP")
                 """
-                cursor.execute(sql, (new_ts, new_date_str, interp_temp, 0, 0, 0, 1, "INTERP"))
+                cursor.execute(sql, (new_ts, new_date_str, interp_temp))
                 log(f"Interpolated reading for {new_date_str}: tempf {interp_temp:.1f}")
+
+    # If the last reading is before expected_end, fill the gap at the end.
+    last_ts, last_temp = rows[-1]
+    if last_ts < expected_end:
+        gap = expected_end - last_ts
+        missing_intervals = gap // 300  # number of intervals missing after last reading
+        for j in range(1, missing_intervals + 1):
+            new_ts = last_ts + j * 300
+            # Use last_temp for extrapolation.
+            interp_temp = last_temp
+            dt_new = datetime.fromtimestamp(new_ts, tz=timezone.utc)
+            new_date_str = dt_new.isoformat() + "Z"
+            sql = """
+                INSERT OR REPLACE INTO readings
+                (dateutc, date, tempf, gdd, gdd_hourly, gdd_daily, is_generated, mac_source)
+                VALUES (?, ?, ?, 0, 0, 0, 1, "INTERP")
+            """
+            cursor.execute(sql, (new_ts, new_date_str, round(interp_temp, 1)))
+            log(f"Interpolated (end) reading for {new_date_str}: tempf {round(interp_temp, 1)}")
+
     conn.commit()
 
-
 # === Main Loop ===
+lastRecalcRowCount = 0
 new_total = 0
 day = START_DATE.date()
 
 while day <= CURRENT_DATE:
+    # Reload config at the beginning of each day to pick up any changes.
+    reload_config()
+    # (Optionally, CURRENT_DATE can also be updated here.)
+
     day_str = day.strftime("%Y-%m-%d")
     cursor.execute("SELECT COUNT(*) FROM readings WHERE substr(date,1,10)=?", (day_str,))
     old_count = cursor.fetchone()[0]
@@ -401,8 +515,7 @@ while day <= CURRENT_DATE:
                         VALUES ({', '.join(['?'] * len(fields_order))}, ?, ?, ?, ?, ?)
                     """
                     try:
-                        insert_tuple = tuple(backup_values.get(k, None) for k in fields_order) + (
-                        0, 0, 0, 0, BACKUP_MAC_ADDRESS)
+                        insert_tuple = tuple(backup_values.get(k, None) for k in fields_order) + (0, 0, 0, 0, BACKUP_MAC_ADDRESS)
                         cursor.execute(sql, insert_tuple)
                         log(f"Inserted backup reading for {raw_date} from backup station.")
                     except Exception as ex:
@@ -428,29 +541,30 @@ while day <= CURRENT_DATE:
     # --- Open-Meteo Fallback (if still fewer than 287 valid readings) ---
     if valid_count < 287:
         log(f"{day_str}: Only {valid_count} valid readings after backup. Attempting to use Open-Meteo data.")
-        df = fetch_openmeteo_data(day_str)
-        if df is not None and not df.empty:
-            # Insert each hourly reading from Open-Meteo into the database.
-            # For these records, we fill only the dateutc, date, and tempf fields.
-            # The other fields will be left as NULL.
-            for _, row in df.iterrows():
-                # Get the timestamp (in seconds) and ISO string.
-                ts = int(row['date'].timestamp())
-                date_str = row['date'].isoformat() + "Z"
-                tempf = round(row['tempf'], 1)
-                sql = """
-                    INSERT OR IGNORE INTO readings
-                    (dateutc, date, tempf, gdd, gdd_hourly, gdd_daily, is_generated, mac_source)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """
-                try:
-                    cursor.execute(sql, (ts, date_str, tempf, 0, 0, 0, 1, "OPENMETEO"))
-                except Exception as ex:
-                    log(f"Error inserting Open-Meteo reading for {date_str}: {ex}")
-            conn.commit()
-            cursor.execute("SELECT COUNT(*) FROM readings WHERE substr(date,1,10)=? AND tempf IS NOT NULL", (day_str,))
-            valid_count = cursor.fetchone()[0]
-            log(f"After Open-Meteo fallback, valid readings for {day_str}: {valid_count}")
+        df_obj = fetch_openmeteo_data(day_str)
+        if df_obj is not None:
+            import pandas as pd
+            df = df_obj  # fetch_openmeteo_data returns a pandas DataFrame
+            if not df.empty:
+                for idx, row in df.iterrows():
+                    ts = int(row['date'].timestamp())
+                    date_str = row['date'].isoformat() + "Z"
+                    tempf = round(row['tempf'], 1)
+                    sql = """
+                        INSERT OR IGNORE INTO readings
+                        (dateutc, date, tempf, gdd, gdd_hourly, gdd_daily, is_generated, mac_source)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """
+                    try:
+                        cursor.execute(sql, (ts, date_str, tempf, 0, 0, 0, 1, "OPENMETEO"))
+                    except Exception as ex:
+                        log(f"Error inserting Open-Meteo reading for {date_str}: {ex}")
+                conn.commit()
+                cursor.execute("SELECT COUNT(*) FROM readings WHERE substr(date,1,10)=? AND tempf IS NOT NULL", (day_str,))
+                valid_count = cursor.fetchone()[0]
+                log(f"After Open-Meteo fallback, valid readings for {day_str}: {valid_count}")
+            else:
+                log(f"No Open-Meteo data received for {day_str}.")
         else:
             log(f"No Open-Meteo data received for {day_str}.")
 
@@ -461,83 +575,23 @@ while day <= CURRENT_DATE:
     else:
         log(f"{day_str}: All intervals have valid temperature data.")
 
+    # --- After interpolation, check the final number of rows for the day ---
+    cursor.execute("SELECT COUNT(*) FROM readings WHERE substr(date, 1, 10)=?", (day_str,))
+    final_day_count = cursor.fetchone()[0]
+    log(f"After interpolation, {day_str} has {final_day_count} readings.")
+
+    # --- Periodic Recalculation of GDD ---
+    cursor.execute("SELECT COUNT(*) FROM readings")
+    totalRowCount = cursor.fetchone()[0]
+    if totalRowCount - lastRecalcRowCount >= RECALC_INTERVAL:
+        recalcGDD()
+        lastRecalcRowCount = totalRowCount
+
     day = day + timedelta(days=1)
 
-# === Final Recalculation of Cumulative, Hourly, and Daily GDD ===
-log("Recalculating cumulative, hourly, and daily GDD (resetting on Jan 1)...")
-cursor.execute("SELECT dateutc, tempf, date FROM readings ORDER BY dateutc ASC")
-rows = cursor.fetchall()
-cumulative_gdd = 0
-current_year = None
-for dateutc, tempf, date_str in rows:
-    if tempf is None:
-        continue
-    try:
-        val = float(tempf)
-    except Exception as e:
-        log(f"Skipping record {dateutc} due to invalid tempf: {tempf}")
-        continue
-    try:
-        year = int(date_str[0:4])
-    except Exception as e:
-        log(f"Could not parse year from date {date_str} for record {dateutc}")
-        continue
-    if current_year is None or current_year != year:
-        cumulative_gdd = 0
-        current_year = year
-    temp_c = (val - 32) * 5 / 9
-    inc = max(0, (temp_c - base_temp_C)) / 288
-    cumulative_gdd += inc
-    cursor.execute("UPDATE readings SET gdd = ? WHERE dateutc = ?", (cumulative_gdd, dateutc))
-
-cursor.execute("SELECT DISTINCT substr(date, 1, 13) AS hour_key FROM readings ORDER BY hour_key ASC")
-hour_keys = [row[0] for row in cursor.fetchall()]
-cumulative_hourly = 0
-current_year_hour = None
-for hour_key in hour_keys:
-    try:
-        year = int(hour_key[:4])
-    except Exception as e:
-        log(f"Could not parse year from hour_key {hour_key}")
-        continue
-    if current_year_hour is None or current_year_hour != year:
-        cumulative_hourly = 0
-        current_year_hour = year
-    cursor.execute("SELECT MAX(tempf), MIN(tempf) FROM readings WHERE substr(date, 1, 13) = ?", (hour_key,))
-    res = cursor.fetchone()
-    if res is None or res[0] is None or res[1] is None:
-        continue
-    hour_max = float(res[0])
-    hour_min = float(res[1])
-    hour_avg = (hour_max + hour_min) / 2.0
-    hourly_period_gdd = max(0, hour_avg - base_temp_F) / 24.0
-    cumulative_hourly += hourly_period_gdd
-    cursor.execute("UPDATE readings SET gdd_hourly = ? WHERE substr(date, 1, 13) = ?", (cumulative_hourly, hour_key))
-
-cursor.execute("SELECT DISTINCT substr(date, 1, 10) AS day_key FROM readings ORDER BY day_key ASC")
-day_keys = [row[0] for row in cursor.fetchall()]
-cumulative_daily = 0
-current_year_day = None
-for day_key in day_keys:
-    try:
-        year = int(day_key[:4])
-    except Exception as e:
-        log(f"Could not parse year from day_key {day_key}")
-        continue
-    if current_year_day is None or current_year_day != year:
-        cumulative_daily = 0
-        current_year_day = year
-    cursor.execute("SELECT MAX(tempf), MIN(tempf) FROM readings WHERE substr(date, 1, 10) = ?", (day_key,))
-    res = cursor.fetchone()
-    if res is None or res[0] is None or res[1] is None:
-        continue
-    day_max = float(res[0])
-    day_min = float(res[1])
-    day_avg = (day_max + day_min) / 2.0
-    daily_period_gdd = max(0, day_avg - base_temp_F)
-    cumulative_daily += daily_period_gdd
-    cursor.execute("UPDATE readings SET gdd_daily = ? WHERE substr(date, 1, 10) = ?", (cumulative_daily, day_key))
-
+# --- Final Recalculation of GDD ---
+log("Performing final recalculation of cumulative, hourly, and daily GDD...")
+recalcGDD()
 conn.commit()
 conn.close()
-log(f"Data retrieval complete. Added {new_total} new primary readings in total.")
+log("Data retrieval complete. Added " + str(new_total) + " new primary readings in total.")

@@ -1,0 +1,18 @@
+[global]
+db_filename = ambient_weather.sqlite
+retry_sleep_time = 10
+rate_limit_delay = 0.34
+
+[primary]
+mac_address = B8:D8:12:60:57:97
+api_key = API KEY HERE
+application_key = APP KEY HERE
+
+[backup]
+mac_address = 54:32:04:49:E2:3C
+
+[api]
+url_template = https://rt.ambientweather.net/v1/devices/{mac_address}?apiKey={api_key}&applicationKey={application_key}&limit=288&endDate={end_date}
+
+[date]
+start_date = 2022-02-11

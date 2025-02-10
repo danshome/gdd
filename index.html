@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Ambient Weather – Daily Avg Temp & Cumulative GDD with Bud Break</title>
+  <!-- Chart.js from CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <!-- sql.js from CDN -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.6.2/sql-wasm.js"></script>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #fafafa;
+      margin: 20px;
+    }
+    h1, h2 {
+      text-align: center;
+    }
+    .controls {
+      text-align: center;
+      margin-bottom: 20px;
+    }
+    .date-range {
+      display: inline-block;
+      margin: 0 20px;
+      vertical-align: top;
+    }
+    .chart-container {
+      width: 90%;
+      margin: auto;
+      margin-bottom: 40px;
+    }
+    canvas {
+      background: #fff;
+      border: 1px solid #ccc;
+      box-shadow: 2px 2px 5px rgba(0,0,0,0.1);
+    }
+  </style>
+</head>
+<body>
+  <h1>Ambient Weather Data Dashboard</h1>
+
+  <!-- Comparison Type Selector -->
+  <div class="controls">
+    <label for="comparisonType">Comparison Type: </label>
+    <select id="comparisonType">
+      <option value="year" selected>Year</option>
+      <option value="month">Month</option>
+      <option value="custom">Custom</option>
+    </select>
+  </div>
+
+  <!-- Date Range Controls for Three Comparisons -->
+  <div class="controls" id="dateRangeControls">
+    <div class="date-range" id="rangeA">
+      <h3>Range A</h3>
+      <label for="startDateA">Start Date: </label>
+      <input type="date" id="startDateA">
+      <br>
+      <label for="endDateA">End Date: </label>
+      <input type="date" id="endDateA">
+    </div>
+    <div class="date-range" id="rangeB">
+      <h3>Range B</h3>
+      <label for="startDateB">Start Date: </label>
+      <input type="date" id="startDateB">
+      <br>
+      <label for="endDateB">End Date: </label>
+      <input type="date" id="endDateB">
+    </div>
+    <div class="date-range" id="rangeC">
+      <h3>Range C</h3>
+      <label for="startDateC">Start Date: </label>
+      <input type="date" id="startDateC">
+      <br>
+      <label for="endDateC">End Date: </label>
+      <input type="date" id="endDateC">
+    </div>
+    <br>
+    <button id="loadData">Load Data</button>
+  </div>
+
+  <div class="chart-container">
+    <h2>Daily Avg Temperature & Cumulative GDD (with Bud Break Points)</h2>
+    <canvas id="dailyChart"></canvas>
+  </div>
+
+  <script>
+    let db = null;
+    let dailyChart;
+    let SQL;
+
+    // Colors for bud-break points
+    const colors = [
+      "rgba(255, 99, 132, 1)",
+      "rgba(75, 192, 192, 1)",
+      "rgba(153, 102, 255, 1)",
+      "rgba(255, 159, 64, 1)",
+      "rgba(201, 203, 207, 1)"
+    ];
+
+    // Initialize sql.js
+    initSqlJs({
+      locateFile: file => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.6.2/${file}`
+    }).then(function(SQLLib) {
+      SQL = SQLLib;
+      return fetch("ambient_weather.sqlite");
+    }).then(response => response.arrayBuffer())
+      .then(buffer => {
+        db = new SQL.Database(new Uint8Array(buffer));
+        console.log("Database loaded successfully.");
+      }).catch(err => console.error("Error initializing database:", err));
+
+    // Query for daily average temperature and maximum cumulative GDD per day.
+    function queryData(startDate, endDate) {
+      const sqlQuery = `
+        SELECT substr(date, 1, 10) AS day_key,
+               AVG(tempf) AS avgTempF,
+               MAX(gdd)  AS maxCumGDD
+        FROM readings
+        WHERE date BETWEEN ? AND ?
+        GROUP BY day_key
+        ORDER BY day_key ASC;
+      `;
+      const stmt = db.prepare(sqlQuery);
+      const results = [];
+      stmt.bind([startDate, endDate]);
+      while (stmt.step()) {
+        results.push(stmt.getAsObject());
+      }
+      stmt.free();
+      return results;
+    }
+
+    // Process queried rows into arrays
+    function processDailyData(rows) {
+      const labels = [];
+      const avgTemps = [];
+      const cumGDDs = [];
+      rows.forEach(r => {
+        labels.push(r.day_key); // e.g., "2023-01-01"
+        avgTemps.push(parseFloat(r.avgTempF));
+        cumGDDs.push(parseFloat(r.maxCumGDD));
+      });
+      return { labels, avgTemps, cumGDDs };
+    }
+
+    // Transform a full date to a display value.
+    // For 'year' we return "MM-DD"; for 'month' just the day; for 'custom' we return the full date.
+    function transformDate(dateStr, compType) {
+      const d = new Date(dateStr);
+      if (compType === 'year') {
+        const m = String(d.getMonth() + 1).padStart(2, '0');
+        const day = String(d.getDate()).padStart(2, '0');
+        return m + "-" + day;
+      } else if (compType === 'month') {
+        return String(d.getDate()).padStart(2, '0');
+      } else {
+        return dateStr; // custom
+      }
+    }
+
+    // Set default date ranges based on comparison type.
+    function setDefaultDates() {
+      const compType = document.getElementById('comparisonType').value;
+      const today = new Date();
+      const pad = n => n.toString().padStart(2, '0');
+      if (compType === 'year') {
+        const thisYear = today.getFullYear();
+        const lastYear = thisYear - 1;
+        const twoYearsAgo = thisYear - 2;
+        const endDateCurrent = `${thisYear}-${pad(today.getMonth()+1)}-${pad(today.getDate())}`;
+        document.getElementById('startDateC').value = `${thisYear}-01-01`;
+        document.getElementById('endDateC').value = endDateCurrent;
+        document.getElementById('startDateB').value = `${lastYear}-01-01`;
+        document.getElementById('endDateB').value = `${lastYear}-${pad(today.getMonth()+1)}-${pad(today.getDate())}`;
+        document.getElementById('startDateA').value = `${twoYearsAgo}-01-01`;
+        document.getElementById('endDateA').value = `${twoYearsAgo}-${pad(today.getMonth()+1)}-${pad(today.getDate())}`;
+      } else if (compType === 'month') {
+        const thisYear = today.getFullYear();
+        const thisMonth = today.getMonth();
+        // Range C
+        const startDateC = `${thisYear}-${pad(thisMonth+1)}-01`;
+        const endDateC = `${thisYear}-${pad(thisMonth+1)}-${pad(today.getDate())}`;
+        document.getElementById('startDateC').value = startDateC;
+        document.getElementById('endDateC').value = endDateC;
+        // Range B
+        const lastMonthDate = new Date(thisYear, thisMonth - 1, 1);
+        const lastMonthYear = lastMonthDate.getFullYear();
+        const lastMonth = lastMonthDate.getMonth() + 1;
+        document.getElementById('startDateB').value = `${lastMonthYear}-${pad(lastMonth)}-01`;
+        document.getElementById('endDateB').value = `${lastMonthYear}-${pad(lastMonth)}-${pad(today.getDate())}`;
+        // Range A
+        const twoMonthsAgoDate = new Date(thisYear, thisMonth - 2, 1);
+        const twoMonthsAgoYear = twoMonthsAgoDate.getFullYear();
+        const twoMonthsAgo = twoMonthsAgoDate.getMonth() + 1;
+        document.getElementById('startDateA').value = `${twoMonthsAgoYear}-${pad(twoMonthsAgo)}-01`;
+        document.getElementById('endDateA').value = `${twoMonthsAgoYear}-${pad(twoMonthsAgo)}-${pad(today.getDate())}`;
+      } else {
+        const sevenDaysAgo = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000);
+        const format = d => d.toISOString().slice(0, 10);
+        document.getElementById('startDateA').value = format(sevenDaysAgo);
+        document.getElementById('endDateA').value = format(today);
+        document.getElementById('startDateB').value = format(sevenDaysAgo);
+        document.getElementById('endDateB').value = format(today);
+        document.getElementById('startDateC').value = format(sevenDaysAgo);
+        document.getElementById('endDateC').value = format(today);
+      }
+    }
+    document.getElementById('comparisonType').addEventListener('change', setDefaultDates);
+    window.onload = setDefaultDates;
+
+    // --- OVERLAY LOGIC ---
+    // When overlaying (compType "year" or "month"), we need a common set of x-axis labels.
+    // For "custom" we simply use the full dates.
+    // We also need to “align” each dataset to this common set.
+    function loadAndPlotData() {
+      if (!db) {
+        alert("Database not loaded yet. Please try again shortly.");
+        return;
+      }
+      const compType = document.getElementById('comparisonType').value;
+
+      // Get the date ranges from the controls.
+      const startA = document.getElementById('startDateA').value;
+      const endA   = document.getElementById('endDateA').value;
+      const startB = document.getElementById('startDateB').value;
+      const endB   = document.getElementById('endDateB').value;
+      const startC = document.getElementById('startDateC').value;
+      const endC   = document.getElementById('endDateC').value;
+
+      // Query and process data for each range.
+      const rowsA = queryData(startA, endA);
+      const rowsB = queryData(startB, endB);
+      const rowsC = queryData(startC, endC);
+      if (rowsA.length === 0 || rowsB.length === 0 || rowsC.length === 0) {
+        alert("No data found for one or more of the selected date ranges.");
+        return;
+      }
+      const dailyA = processDailyData(rowsA);
+      const dailyB = processDailyData(rowsB);
+      const dailyC = processDailyData(rowsC);
+
+      // Build a merged set of x-axis labels.
+      let mergedLabels;
+      if (compType === 'custom') {
+        const labelSet = new Set([...dailyA.labels, ...dailyB.labels, ...dailyC.labels]);
+        mergedLabels = Array.from(labelSet).sort();  // For full dates in ISO format, lexicographic sort works.
+      } else {
+        const labelSet = new Set();
+        dailyA.labels.forEach(label => labelSet.add(transformDate(label, compType)));
+        dailyB.labels.forEach(label => labelSet.add(transformDate(label, compType)));
+        dailyC.labels.forEach(label => labelSet.add(transformDate(label, compType)));
+        mergedLabels = Array.from(labelSet).sort();  // e.g., "01-01", "01-02", … "04-01"
+      }
+
+      // Helper function to align a range’s data to the merged labels.
+      function alignData(dailyObj, valueArray) {
+        const map = {};
+        dailyObj.labels.forEach((date, i) => {
+          const label = compType === 'custom' ? date : transformDate(date, compType);
+          map[label] = valueArray[i];
+        });
+        return mergedLabels.map(l => (map.hasOwnProperty(l) ? map[l] : null));
+      }
+
+      const dataA_avgTemp = alignData(dailyA, dailyA.avgTemps);
+      const dataA_cumGDD  = alignData(dailyA, dailyA.cumGDDs);
+      const dataB_avgTemp = alignData(dailyB, dailyB.avgTemps);
+      const dataB_cumGDD  = alignData(dailyB, dailyB.cumGDDs);
+      const dataC_avgTemp = alignData(dailyC, dailyC.avgTemps);
+      const dataC_cumGDD  = alignData(dailyC, dailyC.cumGDDs);
+
+      // The main line datasets for temperature and cumulative GDD.
+      const datasets = [
+        {
+          label: "Daily Avg Temp (°F) - Range A",
+          data: dataA_avgTemp,
+          borderColor: "rgba(255, 99, 132, 1)",
+          backgroundColor: "rgba(255, 99, 132, 0.2)",
+          yAxisID: "y",
+          tension: 0.4,
+          pointRadius: 3
+        },
+        {
+          label: "Cumulative GDD - Range A",
+          data: dataA_cumGDD,
+          borderColor: "rgba(255, 99, 132, 0.7)",
+          backgroundColor: "rgba(255, 99, 132, 0.1)",
+          yAxisID: "y1",
+          tension: 0.4,
+          pointRadius: 2,
+          borderDash: [10, 5]
+        },
+        {
+          label: "Daily Avg Temp (°F) - Range B",
+          data: dataB_avgTemp,
+          borderColor: "rgba(75, 192, 192, 1)",
+          backgroundColor: "rgba(75, 192, 192, 0.2)",
+          yAxisID: "y",
+          tension: 0.4,
+          pointRadius: 3
+        },
+        {
+          label: "Cumulative GDD - Range B",
+          data: dataB_cumGDD,
+          borderColor: "rgba(75, 192, 192, 0.7)",
+          backgroundColor: "rgba(75, 192, 192, 0.1)",
+          yAxisID: "y1",
+          tension: 0.4,
+          pointRadius: 2,
+          borderDash: [10, 5]
+        },
+        {
+          label: "Daily Avg Temp (°F) - Range C",
+          data: dataC_avgTemp,
+          borderColor: "rgba(153, 102, 255, 1)",
+          backgroundColor: "rgba(153, 102, 255, 0.2)",
+          yAxisID: "y",
+          tension: 0.4,
+          pointRadius: 3
+        },
+        {
+          label: "Cumulative GDD - Range C",
+          data: dataC_cumGDD,
+          borderColor: "rgba(153, 102, 255, 0.7)",
+          backgroundColor: "rgba(153, 102, 255, 0.1)",
+          yAxisID: "y1",
+          tension: 0.4,
+          pointRadius: 2,
+          borderDash: [10, 5]
+        }
+      ];
+
+      // For each range, determine the first bud break (i.e. the first day cumulative GDD crosses a threshold)
+      // and create a scatter dataset that has a value only at the matching merged label.
+      function findBudBreakPointsAligned(dailyObj, rangeName) {
+        const result = db.exec("SELECT variety, heat_summation FROM grapevine_gdd ORDER BY variety");
+        if (result.length === 0) return [];
+        const rowVals = result[0].values; // e.g., [["Chardonnay", 350], ...]
+        const scatterPoints = [];
+        rowVals.forEach((varietyRow, idx) => {
+          const variety = varietyRow[0];
+          const threshold = varietyRow[1];
+          for (let i = 0; i < dailyObj.cumGDDs.length; i++) {
+            if (dailyObj.cumGDDs[i] >= threshold) {
+              const crossingDate = dailyObj.labels[i];
+              const xVal = compType === 'custom' ? crossingDate : transformDate(crossingDate, compType);
+              // Build an array of the same length as mergedLabels: value at the matching label, null elsewhere.
+              const budData = mergedLabels.map(label => label === xVal ? dailyObj.cumGDDs[i] : null);
+              scatterPoints.push({
+                label: `${variety} bud break (${rangeName})`,
+                data: budData,
+                borderColor: colors[idx % colors.length],
+                backgroundColor: colors[idx % colors.length],
+                pointRadius: 6,
+                type: 'scatter',
+                showLine: false,
+                order: 2,
+                yAxisID: 'y1'
+              });
+              break; // Only use the first crossing.
+            }
+          }
+        });
+        return scatterPoints;
+      }
+
+      const scatterA = findBudBreakPointsAligned(dailyA, "Range A");
+      const scatterB = findBudBreakPointsAligned(dailyB, "Range B");
+      const scatterC = findBudBreakPointsAligned(dailyC, "Range C");
+
+      const allDatasets = datasets.concat(scatterA, scatterB, scatterC);
+
+      if (dailyChart) dailyChart.destroy();
+      const ctx = document.getElementById('dailyChart').getContext('2d');
+      dailyChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels: mergedLabels,
+          datasets: allDatasets
+        },
+        options: {
+          responsive: true,
+          plugins: {
+            title: {
+              display: true,
+              text: "Daily Avg Temperature & Cumulative GDD (with Bud Break Points)"
+            }
+          },
+          scales: {
+            x: {
+              title: {
+                display: true,
+                text: compType === 'year' ? 'MM-DD'
+                     : compType === 'month' ? 'Day'
+                     : 'Date'
+              }
+            },
+            y: {
+              position: "left",
+              title: { display: true, text: "Temperature (°F)" }
+            },
+            y1: {
+              position: "right",
+              title: { display: true, text: "Cumulative GDD" },
+              grid: { drawOnChartArea: false }
+            }
+          }
+        }
+      });
+    }
+
+    document.getElementById("loadData").addEventListener("click", loadAndPlotData);
+  </script>
+</body>
+</html>

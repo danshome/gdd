@@ -26,7 +26,6 @@ config.read('config.ini')
 DB_FILENAME = config.get('global', 'db_filename')
 RETRY_SLEEP_TIME = config.getfloat('global', 'retry_sleep_time')
 RATE_LIMIT_DELAY = config.getfloat('global', 'rate_limit_delay')
-# Provide a fallback if api_call_delay is not present
 API_CALL_DELAY = config.getfloat('global', 'api_call_delay', fallback=1.0)
 DEBUG = config.getboolean('global', 'debug')
 
@@ -38,12 +37,16 @@ APPLICATION_KEY = config.get('primary', 'application_key')
 # Backup weather station configuration
 BACKUP_MAC_ADDRESS = config.get('backup', 'mac_address')
 
-# API endpoint template
+# API endpoint template for Ambient Weather
 URL_TEMPLATE = config.get('api', 'url_template')
 
 # Date configuration
 START_DATE = datetime.strptime(config.get('date', 'start_date'), "%Y-%m-%d")
 CURRENT_DATE = datetime.now(timezone.utc).date()
+
+# Open-Meteo configuration (for fallback)
+OPENMETEO_LAT = config.getfloat('openmeteo', 'latitude')
+OPENMETEO_LON = config.getfloat('openmeteo', 'longitude')
 
 # === Fields to Store (Order Matters) ===
 fields_order = [
@@ -129,15 +132,11 @@ with open("grapevine_gdd.csv", "r", newline='') as csvfile:
 conn.commit()
 
 
-# === Fetch Data Function with API_CALL_DELAY Before Each API Call ===
+# === Fetch Data from Ambient Weather API ===
 def fetch_day_data(mac_address, end_date):
     """
-    Fetch data for a given day using the specified MAC address.
-    end_date is a string (YYYY-MM-DD) representing the end boundary.
-    If a non-retryable error (e.g., 401, 403) is returned, or if a 503 error indicates a
-    Retry-After delay > 30 sec, returns None.
-
-    This function sleeps for API_CALL_DELAY seconds before each API call.
+    Fetch data for a given day using Ambient Weather’s API.
+    Sleeps for API_CALL_DELAY seconds before each call.
     """
     url = URL_TEMPLATE.format(
         mac_address=mac_address,
@@ -147,8 +146,8 @@ def fetch_day_data(mac_address, end_date):
     )
     log(f"Calling API URL: {url}")
     while True:
-        log_debug(f"Sleeping for API_CALL_DELAY of {API_CALL_DELAY} seconds before API call.")
-        time.sleep(API_CALL_DELAY)
+        log_debug(f"Sleeping for RATE_LIMIT_DELAY of {RATE_LIMIT_DELAY} seconds before API call.")
+        time.sleep(RATE_LIMIT_DELAY)
         try:
             response = requests.get(url, timeout=10)
         except Exception as ex:
@@ -205,7 +204,64 @@ def fetch_day_data(mac_address, end_date):
         return response.json()
 
 
-# --- Base Temperatures for GDD Calculations ---
+# === Fetch Data from Open-Meteo API as Fallback ===
+def fetch_openmeteo_data(day_str):
+    """
+    Fetch hourly data for the given day from the Open-Meteo archive.
+    Returns a pandas DataFrame with columns 'date' and 'tempf'.
+    """
+    try:
+        import openmeteo_requests
+        import requests_cache
+        from retry_requests import retry
+        import pandas as pd
+    except ImportError:
+        log("Open-Meteo packages not installed. Please install openmeteo_requests, requests_cache, and retry_requests.")
+        return None
+
+    # Set the start_date and end_date for the day
+    start_date = day_str
+    dt = datetime.strptime(day_str, "%Y-%m-%d")
+    end_date = (dt + timedelta(days=1)).strftime("%Y-%m-%d")
+
+    cache_session = requests_cache.CachedSession('.cache', expire_after=-1)
+    retry_session = retry(cache_session, retries=5, backoff_factor=0.2)
+    openmeteo = openmeteo_requests.Client(session=retry_session)
+
+    url = "https://archive-api.open-meteo.com/v1/archive"
+    params = {
+        "latitude": OPENMETEO_LAT,
+        "longitude": OPENMETEO_LON,
+        "start_date": start_date,
+        "end_date": end_date,
+        "hourly": "temperature_2m",
+        "temperature_unit": "fahrenheit",
+        "wind_speed_unit": "mph",
+        "precipitation_unit": "inch"
+    }
+    log(f"Calling Open-Meteo API URL: {url} with params: {params}")
+    responses = openmeteo.weather_api(url, params=params)
+    if responses:
+        response = responses[0]
+        hourly = response.Hourly()
+        # Create a pandas date range from the API’s timestamps
+        import pandas as pd
+        time_range = pd.date_range(
+            start=pd.to_datetime(hourly.Time(), unit="s", utc=True),
+            end=pd.to_datetime(hourly.TimeEnd(), unit="s", utc=True),
+            freq=pd.Timedelta(seconds=hourly.Interval()),
+            inclusive="left"
+        )
+        # Get hourly temperature values
+        temp_values = hourly.Variables(0).ValuesAsNumpy()
+        df = pd.DataFrame({"date": time_range, "tempf": temp_values})
+        return df
+    else:
+        log("No Open-Meteo data received.")
+        return None
+
+
+# === Base Temperatures for GDD Calculations ===
 base_temp_C = 10  # For 5-minute cumulative GDD (°C)
 base_temp_F = 50  # For hourly/daily calculations (°F)
 
@@ -213,7 +269,7 @@ base_temp_F = 50  # For hourly/daily calculations (°F)
 # === Gap Filling via Interpolation Function ===
 def fill_missing_data_by_gap(day_str):
     """
-    For a given day (YYYY-MM-DD), examine consecutive readings.
+    For a given day (YYYY-MM-DD), examine consecutive readings in the database.
     If the gap between two rows exceeds 300 seconds, linearly interpolate missing intervals.
     Interpolated tempf values are rounded to one decimal.
     Inserted rows get is_generated = 1 and mac_source = "INTERP".
@@ -251,6 +307,7 @@ def fill_missing_data_by_gap(day_str):
     conn.commit()
 
 
+# === Main Loop ===
 new_total = 0
 day = START_DATE.date()
 
@@ -313,10 +370,7 @@ while day <= CURRENT_DATE:
             log(f"Inserted {inserted_count} new primary readings for {day_str} (total now: {new_count}).")
 
     # --- Backup Data Insertion (if valid_count is less than 287) ---
-    cursor.execute(
-        "SELECT COUNT(*) FROM readings WHERE substr(date,1,10)=? AND tempf IS NOT NULL",
-        (day_str,)
-    )
+    cursor.execute("SELECT COUNT(*) FROM readings WHERE substr(date,1,10)=? AND tempf IS NOT NULL", (day_str,))
     valid_count = cursor.fetchone()[0]
     if valid_count < 287:
         log(f"{day_str}: Only {valid_count} valid readings from primary. Attempting to use backup data.")
@@ -367,17 +421,43 @@ while day <= CURRENT_DATE:
                         except Exception as ex:
                             log(f"Error updating backup reading for {raw_date}: {ex}")
             conn.commit()
-            cursor.execute(
-                "SELECT COUNT(*) FROM readings WHERE substr(date,1,10)=? AND tempf IS NOT NULL",
-                (day_str,)
-            )
+            cursor.execute("SELECT COUNT(*) FROM readings WHERE substr(date,1,10)=? AND tempf IS NOT NULL", (day_str,))
             valid_count = cursor.fetchone()[0]
         else:
             log(f"No backup data received for {day_str}.")
 
+    # --- Open-Meteo Fallback (if still fewer than 287 valid readings) ---
+    if valid_count < 287:
+        log(f"{day_str}: Only {valid_count} valid readings after backup. Attempting to use Open-Meteo data.")
+        df = fetch_openmeteo_data(day_str)
+        if df is not None and not df.empty:
+            # Insert each hourly reading from Open-Meteo into the database.
+            # For these records, we fill only the dateutc, date, and tempf fields.
+            # The other fields will be left as NULL.
+            for _, row in df.iterrows():
+                # Get the timestamp (in seconds) and ISO string.
+                ts = int(row['date'].timestamp())
+                date_str = row['date'].isoformat() + "Z"
+                tempf = round(row['tempf'], 1)
+                sql = """
+                    INSERT OR IGNORE INTO readings
+                    (dateutc, date, tempf, gdd, gdd_hourly, gdd_daily, is_generated, mac_source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """
+                try:
+                    cursor.execute(sql, (ts, date_str, tempf, 0, 0, 0, 1, "OPENMETEO"))
+                except Exception as ex:
+                    log(f"Error inserting Open-Meteo reading for {date_str}: {ex}")
+            conn.commit()
+            cursor.execute("SELECT COUNT(*) FROM readings WHERE substr(date,1,10)=? AND tempf IS NOT NULL", (day_str,))
+            valid_count = cursor.fetchone()[0]
+            log(f"After Open-Meteo fallback, valid readings for {day_str}: {valid_count}")
+        else:
+            log(f"No Open-Meteo data received for {day_str}.")
+
     # --- Interpolation as Last Resort ---
     if valid_count < 287:
-        log(f"{day_str}: Only {valid_count} valid readings after backup. Filling gaps via interpolation.")
+        log(f"{day_str}: Only {valid_count} valid readings after all fallbacks. Filling gaps via interpolation.")
         fill_missing_data_by_gap(day_str)
     else:
         log(f"{day_str}: All intervals have valid temperature data.")

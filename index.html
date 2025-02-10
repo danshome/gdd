@@ -38,6 +38,11 @@
     #toggleRightPanel {
       right: 0;
     }
+    /* Auto Refresh Toggle Control */
+    #autoRefreshControl {
+      text-align: center;
+      margin: 10px 0;
+    }
     /* Flex container for panels and chart */
     .flex-container {
       display: flex;
@@ -96,15 +101,45 @@
       display: block;
       margin: 5px 0;
     }
+    /* Custom legend container styling */
+    #legendContainer {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 8px;
+      padding: 5px;
+      box-sizing: border-box;
+    }
+    #legendContainer .legend-item {
+      display: inline-flex;
+      align-items: center;
+      padding: 4px 8px;
+      border: 1px solid;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.9em;
+      margin: 2px;
+    }
   </style>
 </head>
 <body>
   <h1>Robert Clay Vineyards</h1>
   <h2>GDD 50 Data Dashboard</h2>
-  <h3>Data Sources: <a href="https://ambientweather.net/">ambientweather.net</a> &amp; <a href="https://open-meteo.com/en/docs/historical-weather-api">Open-Meteo</a></h3>
+  <h3>
+    Data Sources:
+    <a href="https://ambientweather.net/">ambientweather.net</a> &amp;
+    <a href="https://open-meteo.com/en/docs/historical-weather-api">Open-Meteo</a>
+  </h3>
   <!-- Toggle buttons for slide-out panels -->
   <button id="toggleLeftPanel">Toggle Months</button>
   <button id="toggleRightPanel">Toggle Years</button>
+  <!-- Auto Refresh Toggle -->
+  <div id="autoRefreshControl">
+    <label>
+      <input type="checkbox" id="autoRefreshCheckbox" checked>
+      Auto Refresh
+    </label>
+  </div>
 
   <div class="container">
     <div class="flex-container">
@@ -116,7 +151,7 @@
           <label><input type="checkbox" name="month" value="2" checked> February</label>
           <label><input type="checkbox" name="month" value="3" checked> March</label>
           <label><input type="checkbox" name="month" value="4" checked> April</label>
-          <label><input type="checkbox" name="month" value="5"> May</label>
+          <label><input type="checkbox" name="month" value="5" checked> May</label>
           <label><input type="checkbox" name="month" value="6"> June</label>
           <label><input type="checkbox" name="month" value="7"> July</label>
           <label><input type="checkbox" name="month" value="8"> August</label>
@@ -130,18 +165,62 @@
       <div id="chartContainer">
         <h2>Daily Avg Temp, Cumulative GDD, Daily Rain & Bud Break</h2>
         <canvas id="dailyChart"></canvas>
+        <!-- Custom legend will be generated here -->
+        <div id="legendContainer"></div>
       </div>
       <!-- Right slide-out panel for Year Filters -->
       <div id="rightPanel">
         <h3>Select Years</h3>
         <div id="yearControls">
-          <!-- Dynamically populated -->
+          <!-- Dynamically populated once after DB load -->
         </div>
       </div>
     </div>
   </div>
 
   <script>
+    // Global configuration (for demo)
+    const DEBUG = true;
+    const DB_FILENAME = "ambient_weather.sqlite";
+
+    // --- Helper Functions for Logging ---
+    function log(message) {
+      const now = new Date().toISOString().replace("T", " ").replace("Z", "");
+      console.log("[" + now + "] " + message);
+    }
+    function log_debug(message) {
+      if (DEBUG) {
+        log("[DEBUG] " + message);
+      }
+    }
+
+    // Global auto-refresh settings
+    let autoRefresh = true;
+    let refreshIntervalId = null;
+    // Set the auto-refresh period (milliseconds)
+    const AUTO_REFRESH_PERIOD = 60000; // 60 seconds
+
+    // Sample event flags for years (modify as needed)
+    const yearEvents = {
+      "2008": ["Solar Min", "La Niña"],
+      "2009": ["La Niña"],
+      "2010": ["La Niña"],
+      "2011": ["La Niña"],
+      "2012": ["La Niña"],
+      "2013": [],
+      "2014": ["Solar Max"],
+      "2015": ["El Niño"],
+      "2016": ["El Niño"],
+      "2017": ["La Niña"],
+      "2018": [],
+      "2019": ["Solar Min"],
+      "2020": ["La Niña"],
+      "2021": ["La Niña"],
+      "2022": [],
+      "2023": [],
+      "2024": []
+    };
+
     // Custom Plugin: horizontalLinePlugin draws horizontal lines at 32°F, 50°F, and 89°F.
     const horizontalLinePlugin = {
       id: 'horizontalLinePlugin',
@@ -174,21 +253,20 @@
     let dailyChart;
     let SQL;
 
-    // --- Helper Functions for Logging ---
-    function log(message) {
-      const now = new Date().toISOString().replace("T", " ").replace("Z", "");
-      console.log("[" + now + "] " + message);
-    }
-    function log_debug(message) {
-      if (DEBUG) {
-        log("[DEBUG] " + message);
+    // --- Auto-Refresh Control Functions ---
+    function startAutoRefresh() {
+      if (!refreshIntervalId) {
+        refreshIntervalId = setInterval(loadAndPlotData, AUTO_REFRESH_PERIOD);
+        log("Auto Refresh started (every " + (AUTO_REFRESH_PERIOD/1000) + " seconds).");
       }
     }
-
-    // Global Configuration (for demo purposes)
-    let DEBUG = true;
-    let DB_FILENAME = "ambient_weather.sqlite";
-    // (Other configuration variables such as API keys, etc., are assumed to be set on the server side.)
+    function stopAutoRefresh() {
+      if (refreshIntervalId) {
+        clearInterval(refreshIntervalId);
+        refreshIntervalId = null;
+        log("Auto Refresh stopped.");
+      }
+    }
 
     // --- Initialize sql.js and load the database ---
     initSqlJs({
@@ -200,18 +278,30 @@
       .then(buffer => {
         db = new SQL.Database(new Uint8Array(buffer));
         log("Database loaded successfully.");
+        // Populate the year checkboxes once (do not refresh these on every auto refresh)
         populateYearControls();
         loadAndPlotData();
-        // Attach event listeners to filters for auto-reload.
+        startAutoRefresh();
+        // Attach event listeners to filters.
         document.querySelectorAll("input[name='year']").forEach(cb => {
           cb.addEventListener("change", loadAndPlotData);
         });
         document.querySelectorAll("input[name='month']").forEach(cb => {
           cb.addEventListener("change", loadAndPlotData);
         });
+        // Attach event listener to auto refresh toggle.
+        document.getElementById("autoRefreshCheckbox").addEventListener("change", function() {
+          autoRefresh = this.checked;
+          log("Auto Refresh is now " + (autoRefresh ? "enabled" : "disabled"));
+          if (autoRefresh) {
+            startAutoRefresh();
+          } else {
+            stopAutoRefresh();
+          }
+        });
       }).catch(err => console.error("Error initializing database:", err));
 
-    // --- Populate Year Controls Dynamically ---
+    // --- Populate Year Controls Dynamically with Event Flags ---
     function populateYearControls() {
       const res = db.exec("SELECT DISTINCT substr(date, 1, 4) as year FROM readings ORDER BY year ASC;");
       const yearControls = document.getElementById("yearControls");
@@ -219,8 +309,12 @@
       if (res.length > 0) {
         const years = res[0].values.map(row => row[0]);
         years.forEach(year => {
+          let labelText = year;
+          if (yearEvents.hasOwnProperty(year) && yearEvents[year].length > 0) {
+            labelText += " (" + yearEvents[year].join(", ") + ")";
+          }
           const label = document.createElement("label");
-          label.innerHTML = `<input type="checkbox" name="year" value="${year}" checked> ${year}`;
+          label.innerHTML = `<input type="checkbox" name="year" value="${year}" checked> ${labelText}`;
           yearControls.appendChild(label);
         });
       }
@@ -250,7 +344,6 @@
     }
 
     // --- Process Queried Data ---
-    // Returns an object mapping day_key (MM-DD) to an object with the values.
     function processYearlyData(rows) {
       const data = {};
       rows.forEach(r => {
@@ -270,34 +363,29 @@
 
     // --- Compute Bud Break Points Grouped by Variety ---
     function computeBudBreakPoints(selectedYears, commonLabels, yearlyData) {
-      // First, query grapevine_gdd once to get thresholds.
       const result = db.exec("SELECT variety, heat_summation FROM grapevine_gdd ORDER BY variety");
       if (result.length === 0) return [];
-      const grapeData = result[0].values; // array of [variety, threshold]
-      // Create an object to hold bud break points by variety.
+      const grapeData = result[0].values;
       const budBreakByVariety = {};
       grapeData.forEach(row => {
         const variety = row[0];
         budBreakByVariety[variety] = [];
       });
-      // For each selected year, for each variety, find the first crossing (if any)
       selectedYears.forEach(year => {
         const dataForYear = yearlyData[year];
         grapeData.forEach(row => {
           const variety = row[0];
           const threshold = row[1];
-          // Loop over commonLabels (sorted MM-DD)
           for (let i = 0; i < commonLabels.length; i++) {
             const dayKey = commonLabels[i];
             const record = dataForYear[dayKey];
             if (record && record.maxCumGDD >= threshold) {
-              budBreakByVariety[variety].push({ x: dayKey, y: record.maxCumGDD });
-              break; // Only one bud break point per year per variety.
+              budBreakByVariety[variety].push({ x: dayKey, y: record.maxCumGDD, year: year });
+              break; // One bud break point per year per variety.
             }
           }
         });
       });
-      // Now, build one scatter dataset per grape variety.
       const scatterDatasets = [];
       Object.keys(budBreakByVariety).forEach(variety => {
         const points = budBreakByVariety[variety];
@@ -359,6 +447,38 @@
       return `rgb(${r},${g},${b})`;
     }
 
+    // --- Generate Custom Legend ---
+    function generateCustomLegend(chart) {
+      const legendContainer = document.getElementById('legendContainer');
+      legendContainer.innerHTML = '';
+      const datasets = chart.data.datasets;
+      const legendList = document.createElement('div');
+      legendList.style.display = 'flex';
+      legendList.style.flexWrap = 'wrap';
+      legendList.style.justifyContent = 'center';
+      legendList.style.gap = '8px';
+      datasets.forEach((ds, index) => {
+        const legendItem = document.createElement('div');
+        legendItem.className = 'legend-item';
+        let markerHTML = "";
+        if (ds.type === "scatter") {
+          markerHTML = `<span style="display:inline-block; width:12px; height:12px; background-color:${ds.borderColor}; border-radius:50%; margin-right:5px;"></span>`;
+        } else if (ds.type === "line") {
+          const dash = ds.borderDash && ds.borderDash.length > 0 ? "dashed" : "solid";
+          markerHTML = `<span style="display:inline-block; width:20px; border-bottom:2px ${dash} ${ds.borderColor}; margin-right:5px;"></span>`;
+        } else if (ds.type === "bar") {
+          markerHTML = `<span style="display:inline-block; width:12px; height:12px; background-color:${ds.backgroundColor}; margin-right:5px;"></span>`;
+        }
+        legendItem.innerHTML = markerHTML + ds.label;
+        legendItem.onclick = function() {
+          chart.toggleDataVisibility(index);
+          chart.update();
+        };
+        legendList.appendChild(legendItem);
+      });
+      legendContainer.appendChild(legendList);
+    }
+
     // --- Load and Plot Data Automatically (Overlay Years) ---
     function loadAndPlotData() {
       if (!db) return;
@@ -368,19 +488,17 @@
       const selectedMonths = Array.from(monthCheckboxes).map(cb => parseInt(cb.value));
       if (selectedYears.length === 0 || selectedMonths.length === 0) return;
 
-      // Build a union set of common day labels (MM-DD) across selected years.
       let commonLabelsSet = new Set();
-      let yearlyData = {}; // year -> { day_key -> {avgTempF, maxCumGDD, rainTotal} }
+      let yearlyData = {};
       selectedYears.forEach(year => {
         const rows = queryDataByYearAndMonths(year, selectedMonths);
         const data = processYearlyData(rows);
         yearlyData[year] = data;
         Object.keys(data).forEach(day_key => commonLabelsSet.add(day_key));
       });
-      const commonLabels = Array.from(commonLabelsSet).sort(); // e.g. "01-01", "01-02", etc.
+      const commonLabels = Array.from(commonLabelsSet).sort();
 
       let datasets = [];
-      // For each year, create datasets for temperature, cumulative GDD, and rain totals.
       selectedYears.forEach(year => {
         const dataForYear = yearlyData[year];
         const tempData = alignData(commonLabels, dataForYear, "avgTempF");
@@ -421,7 +539,7 @@
         });
       });
 
-      // Compute bud break points grouped by grape variety (only one dataset per grape).
+      // Compute bud break points (one dataset per grape variety across selected years)
       const budBreakDatasets = computeBudBreakPoints(selectedYears, commonLabels, yearlyData);
       datasets = datasets.concat(budBreakDatasets);
 
@@ -442,7 +560,7 @@
               text: "Daily Avg Temp, Cumulative GDD, Daily Rain Totals & Bud Break (Overlayed by Year)"
             },
             legend: {
-              position: 'bottom'
+              display: false  // We are using a custom legend below.
             }
           },
           scales: {
@@ -470,56 +588,7 @@
           }
         }
       });
-    }
-
-    // --- Compute Bud Break Points Grouped by Variety ---
-    function computeBudBreakPoints(selectedYears, commonLabels, yearlyData) {
-      // Query grapevine_gdd for variety thresholds.
-      const result = db.exec("SELECT variety, heat_summation FROM grapevine_gdd ORDER BY variety");
-      if (result.length === 0) return [];
-      const grapeData = result[0].values; // e.g. [ [ "Chardonnay", 350 ], [ "Riesling", 300 ], ... ]
-      // Create an object to hold bud break points by variety.
-      const budBreakByVariety = {};
-      grapeData.forEach(row => {
-        const variety = row[0];
-        budBreakByVariety[variety] = [];
-      });
-      // For each selected year, for each variety, find the first crossing.
-      selectedYears.forEach(year => {
-        const dataForYear = yearlyData[year];
-        grapeData.forEach(row => {
-          const variety = row[0];
-          const threshold = row[1];
-          // Loop over commonLabels (sorted MM-DD)
-          for (let i = 0; i < commonLabels.length; i++) {
-            const dayKey = commonLabels[i];
-            const record = dataForYear[dayKey];
-            if (record && record.maxCumGDD >= threshold) {
-              budBreakByVariety[variety].push({ x: dayKey, y: record.maxCumGDD });
-              break; // Only one bud break point per year per variety.
-            }
-          }
-        });
-      });
-      // Now build one scatter dataset per grape variety.
-      const scatterDatasets = [];
-      Object.keys(budBreakByVariety).forEach(variety => {
-        const points = budBreakByVariety[variety];
-        if (points.length > 0) {
-          scatterDatasets.push({
-            label: variety,
-            data: points,
-            borderColor: getColorForVariety(variety),
-            backgroundColor: getColorForVariety(variety),
-            pointRadius: 6,
-            type: 'scatter',
-            showLine: false,
-            order: 2,
-            yAxisID: 'y1'
-          });
-        }
-      });
-      return scatterDatasets;
+      generateCustomLegend(dailyChart);
     }
 
     // --- Slide-Out Panel Toggle Logic ---
@@ -533,19 +602,12 @@
       rightPanel.classList.toggle("hidden");
       setTimeout(() => window.dispatchEvent(new Event('resize')), 350);
     });
-
     window.addEventListener("resize", function() {
       if (dailyChart) dailyChart.resize();
     });
 
-    // Attach filter event listeners for auto-reload.
+    // Initial load (filters already exist from initial page load)
     window.onload = loadAndPlotData;
-    document.querySelectorAll("input[name='year']").forEach(cb => {
-      cb.addEventListener("change", loadAndPlotData);
-    });
-    document.querySelectorAll("input[name='month']").forEach(cb => {
-      cb.addEventListener("change", loadAndPlotData);
-    });
   </script>
 </body>
 </html>

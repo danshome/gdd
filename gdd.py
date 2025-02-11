@@ -136,6 +136,74 @@ with open("grapevine_gdd.csv", "r", newline='') as csvfile:
         """, (variety, heat_summation))
 conn.commit()
 
+# === Import SunSpot Count Data from CSV ===
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS sunspots (
+    year INTEGER,
+    month INTEGER,
+    day INTEGER,
+    fraction REAL,
+    daily_total INTEGER,
+    std_dev REAL,
+    num_obs INTEGER,
+    definitive INTEGER,
+    date TEXT,
+    PRIMARY KEY (year, month, day)
+);
+""")
+conn.commit()
+
+with open("SN_d_tot_V2.0.csv", "r", newline='') as csvfile:
+    reader = csv.reader(csvfile, delimiter=";")
+    # Skip header row (assumes one exists)
+    header = next(reader)
+    for row in reader:
+        # Ensure there are at least 8 columns.
+        if len(row) < 8:
+            continue
+        try:
+            year = int(row[0])
+        except Exception:
+            continue
+        # Only import data from 2010 onward.
+        if year < 2010:
+            continue
+        try:
+            month = int(row[1])
+            day = int(row[2])
+        except Exception:
+            continue
+        try:
+            fraction = float(row[3])
+        except Exception:
+            fraction = None
+        try:
+            daily_total = int(row[4])
+            # A daily_total value of -1 indicates missing data.
+            if daily_total == -1:
+                daily_total = None
+        except Exception:
+            daily_total = None
+        try:
+            std_dev = float(row[5])
+        except Exception:
+            std_dev = None
+        try:
+            num_obs = int(row[6])
+        except Exception:
+            num_obs = None
+        try:
+            definitive = int(row[7])
+        except Exception:
+            definitive = None
+        # Create a simple date string for reference.
+        date_str = f"{year:04d}-{month:02d}-{day:02d}"
+        cursor.execute("""
+            INSERT OR REPLACE INTO sunspots (year, month, day, fraction, daily_total, std_dev, num_obs, definitive, date)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (year, month, day, fraction, daily_total, std_dev, num_obs, definitive, date_str))
+conn.commit()
+
 # === Function: Recalculate Cumulative, Hourly, and Daily GDD ===
 def recalcGDD():
     log("Recalculating cumulative GDD using incremental updates...")

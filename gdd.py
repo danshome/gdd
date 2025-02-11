@@ -488,7 +488,7 @@ lastRecalcRowCount = 0
 new_total = 0
 day = START_DATE.date()
 
-while day <= CURRENT_DATE:
+while day < CURRENT_DATE:
     # Reload config at the beginning of each day to pick up any changes.
     reload_config()
     # (Optionally, CURRENT_DATE can also be updated here.)
@@ -615,6 +615,16 @@ while day <= CURRENT_DATE:
             df = df_obj  # fetch_openmeteo_data returns a pandas DataFrame
             if not df.empty:
                 for idx, row in df.iterrows():
+
+                    if pd.isnull(row['tempf']):
+                        log(f"Skipping row {idx} due to missing tempf value.")
+                        continue
+                    try:
+                        tempf = round(float(row['tempf']), 1)
+                    except Exception as ex:
+                        log(f"Error rounding tempf value for row {idx}: {ex}")
+                        continue
+
                     ts = int(row['date'].timestamp())
                     date_str = row['date'].isoformat() + "Z"
                     tempf = round(row['tempf'], 1)

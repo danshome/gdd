@@ -605,6 +605,7 @@
             // Iterate over each group.
             Object.keys(groups).forEach(category => {
                 if (category === "Grape Varietal") {
+                    // Grape varietals in left panel (no group toggle added here)
                     const header = document.createElement('div');
                     header.textContent = category;
                     header.style.fontWeight = 'bold';
@@ -643,25 +644,38 @@
                     });
                     grapeVarietalContainer.appendChild(groupDiv);
                 } else {
-                    // For non–grape–varietal groups, create a group wrapper that will be arranged horizontally.
-                    // Each group wrapper is an inline-flex container with a header on top and its legend items stacked vertically.
+                    // For non–grape–varietal groups, create a group wrapper with a group toggle checkbox.
                     const groupWrapper = document.createElement('div');
                     groupWrapper.style.display = "inline-flex";
                     groupWrapper.style.flexDirection = "column";
                     groupWrapper.style.alignItems = "flex-start";
                     groupWrapper.style.marginRight = "15px";
 
-                    const header = document.createElement('div');
-                    header.textContent = category;
-                    header.style.fontWeight = 'bold';
-                    header.style.marginBottom = '5px';
-                    header.style.textAlign = 'left';
-                    groupWrapper.appendChild(header);
+                    // Create header container with a checkbox for group toggle
+                    const headerContainer = document.createElement('div');
+                    headerContainer.style.display = "flex";
+                    headerContainer.style.alignItems = "center";
+                    headerContainer.style.gap = "5px";
+
+                    const groupCheckbox = document.createElement('input');
+                    groupCheckbox.type = "checkbox";
+                    groupCheckbox.checked = true; // initially all on
+
+                    const headerLabel = document.createElement('span');
+                    headerLabel.textContent = category;
+                    headerLabel.style.fontWeight = 'bold';
+
+                    headerContainer.appendChild(groupCheckbox);
+                    headerContainer.appendChild(headerLabel);
+                    groupWrapper.appendChild(headerContainer);
 
                     const groupDiv = document.createElement('div');
                     groupDiv.style.display = "flex";
                     groupDiv.style.flexDirection = "column";
                     groupDiv.style.gap = "8px";
+
+                    // Array to store each legend item and its dataset index for this group.
+                    const groupLegendItems = [];
                     groups[category].forEach(item => {
                         const { ds, index } = item;
                         const legendItem = document.createElement('div');
@@ -694,9 +708,28 @@
                             chart.update();
                         };
                         groupDiv.appendChild(legendItem);
+                        groupLegendItems.push({ legendItem, index });
                     });
                     groupWrapper.appendChild(groupDiv);
                     legendContainer.appendChild(groupWrapper);
+
+                    // Add event listener to groupCheckbox to toggle all items in this group.
+                    groupCheckbox.addEventListener('change', function () {
+                        let newHidden = !groupCheckbox.checked; // if checked then visible (false), if unchecked then hidden (true)
+                        groupLegendItems.forEach(item => {
+                            let idx = item.index;
+                            if (chart.data.datasets[idx].pairIndices) {
+                                const indices = chart.data.datasets[idx].pairIndices;
+                                indices.forEach(i => {
+                                    chart.data.datasets[i].hidden = newHidden;
+                                });
+                            } else {
+                                chart.data.datasets[idx].hidden = newHidden;
+                            }
+                            item.legendItem.style.opacity = newHidden ? 0.5 : 1;
+                        });
+                        chart.update();
+                    });
                 }
             });
         }
@@ -960,17 +993,30 @@
                     groupWrapper.style.alignItems = "flex-start";
                     groupWrapper.style.marginRight = "15px";
 
-                    const header = document.createElement('div');
-                    header.textContent = category;
-                    header.style.fontWeight = 'bold';
-                    header.style.marginBottom = '5px';
-                    header.style.textAlign = 'left';
-                    groupWrapper.appendChild(header);
+                    // Create a header container with a checkbox for group toggle
+                    const headerContainer = document.createElement('div');
+                    headerContainer.style.display = "flex";
+                    headerContainer.style.alignItems = "center";
+                    headerContainer.style.gap = "5px";
+
+                    const groupCheckbox = document.createElement('input');
+                    groupCheckbox.type = "checkbox";
+                    groupCheckbox.checked = true; // initially all on
+
+                    const headerLabel = document.createElement('span');
+                    headerLabel.textContent = category;
+                    headerLabel.style.fontWeight = 'bold';
+
+                    headerContainer.appendChild(groupCheckbox);
+                    headerContainer.appendChild(headerLabel);
+                    groupWrapper.appendChild(headerContainer);
 
                     const groupDiv = document.createElement('div');
                     groupDiv.style.display = "flex";
                     groupDiv.style.flexDirection = "column";
                     groupDiv.style.gap = "8px";
+                    // Array to store legend items for this group
+                    const groupLegendItems = [];
                     groups[category].forEach(item => {
                         const { ds, index } = item;
                         const legendItem = document.createElement('div');
@@ -1003,9 +1049,28 @@
                             chart.update();
                         };
                         groupDiv.appendChild(legendItem);
+                        groupLegendItems.push({ legendItem, index });
                     });
                     groupWrapper.appendChild(groupDiv);
                     legendContainer.appendChild(groupWrapper);
+
+                    // Add event listener to the group checkbox to toggle all items in the group.
+                    groupCheckbox.addEventListener('change', function () {
+                        let newHidden = !groupCheckbox.checked; // if checked, newHidden = false; if unchecked, newHidden = true
+                        groupLegendItems.forEach(item => {
+                            let idx = item.index;
+                            if (chart.data.datasets[idx].pairIndices) {
+                                const indices = chart.data.datasets[idx].pairIndices;
+                                indices.forEach(i => {
+                                    chart.data.datasets[i].hidden = newHidden;
+                                });
+                            } else {
+                                chart.data.datasets[idx].hidden = newHidden;
+                            }
+                            item.legendItem.style.opacity = newHidden ? 0.5 : 1;
+                        });
+                        chart.update();
+                    });
                 }
             });
         }

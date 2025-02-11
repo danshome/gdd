@@ -152,13 +152,13 @@
           <label><input type="checkbox" name="month" value="3" checked> March</label>
           <label><input type="checkbox" name="month" value="4" checked> April</label>
           <label><input type="checkbox" name="month" value="5" checked> May</label>
-          <label><input type="checkbox" name="month" value="6"> June</label>
-          <label><input type="checkbox" name="month" value="7"> July</label>
-          <label><input type="checkbox" name="month" value="8"> August</label>
-          <label><input type="checkbox" name="month" value="9"> September</label>
-          <label><input type="checkbox" name="month" value="10"> October</label>
-          <label><input type="checkbox" name="month" value="11"> November</label>
-          <label><input type="checkbox" name="month" value="12"> December</label>
+          <label><input type="checkbox" name="month" value="6" checked> June</label>
+          <label><input type="checkbox" name="month" value="7" checked> July</label>
+          <label><input type="checkbox" name="month" value="8" checked> August</label>
+          <label><input type="checkbox" name="month" value="9" checked> September</label>
+          <label><input type="checkbox" name="month" value="10" checked> October</label>
+          <label><input type="checkbox" name="month" value="11" checked> November</label>
+          <label><input type="checkbox" name="month" value="12" checked> December</label>
         </div>
       </div>
       <!-- Chart Container -->
@@ -179,21 +179,6 @@
   </div>
 
   <script>
-    // Global configuration (for demo)
-    const DEBUG = true;
-    const DB_FILENAME = "ambient_weather.sqlite";
-
-    // --- Helper Functions for Logging ---
-    function log(message) {
-      const now = new Date().toISOString().replace("T", " ").replace("Z", "");
-      console.log("[" + now + "] " + message);
-    }
-    function log_debug(message) {
-      if (DEBUG) {
-        log("[DEBUG] " + message);
-      }
-    }
-
     // Global auto-refresh settings
     let autoRefresh = true;
     let refreshIntervalId = null;
@@ -253,6 +238,57 @@
     let dailyChart;
     let SQL;
 
+    // --- Helper Functions for Logging ---
+    function log(message) {
+      const now = new Date().toISOString().replace("T", " ").replace("Z", "");
+      console.log("[" + now + "] " + message);
+    }
+    function log_debug(message) {
+      if (DEBUG) {
+        log("[DEBUG] " + message);
+      }
+    }
+
+    // Global configuration (for demo)
+    let DEBUG = true;
+    let DB_FILENAME = "ambient_weather.sqlite";
+
+    // --- Save and Load Filter Settings from localStorage ---
+    function saveFilterSettings() {
+      // Save month selections
+      const monthCheckboxes = document.querySelectorAll("input[name='month']");
+      const selectedMonths = Array.from(monthCheckboxes)
+                                  .filter(cb => cb.checked)
+                                  .map(cb => cb.value);
+      localStorage.setItem("selectedMonths", JSON.stringify(selectedMonths));
+
+      // Save year selections
+      const yearCheckboxes = document.querySelectorAll("input[name='year']");
+      const selectedYears = Array.from(yearCheckboxes)
+                                  .filter(cb => cb.checked)
+                                  .map(cb => cb.value);
+      localStorage.setItem("selectedYears", JSON.stringify(selectedYears));
+    }
+
+    function loadFilterSettings() {
+      // Load and apply month selections
+      const storedMonths = localStorage.getItem("selectedMonths");
+      if (storedMonths) {
+        const selectedMonths = JSON.parse(storedMonths);
+        document.querySelectorAll("input[name='month']").forEach(cb => {
+          cb.checked = selectedMonths.includes(cb.value);
+        });
+      }
+      // Load and apply year selections
+      const storedYears = localStorage.getItem("selectedYears");
+      if (storedYears) {
+        const selectedYears = JSON.parse(storedYears);
+        document.querySelectorAll("input[name='year']").forEach(cb => {
+          cb.checked = selectedYears.includes(cb.value);
+        });
+      }
+    }
+
     // --- Auto-Refresh Control Functions ---
     function startAutoRefresh() {
       if (!refreshIntervalId) {
@@ -280,14 +316,22 @@
         log("Database loaded successfully.");
         // Populate the year checkboxes once (do not refresh these on every auto refresh)
         populateYearControls();
+        // After the year checkboxes have been populated, load saved filter settings
+        loadFilterSettings();
         loadAndPlotData();
         startAutoRefresh();
         // Attach event listeners to filters.
         document.querySelectorAll("input[name='year']").forEach(cb => {
-          cb.addEventListener("change", loadAndPlotData);
+          cb.addEventListener("change", function() {
+            saveFilterSettings();
+            loadAndPlotData();
+          });
         });
         document.querySelectorAll("input[name='month']").forEach(cb => {
-          cb.addEventListener("change", loadAndPlotData);
+          cb.addEventListener("change", function() {
+            saveFilterSettings();
+            loadAndPlotData();
+          });
         });
         // Attach event listener to auto refresh toggle.
         document.getElementById("autoRefreshCheckbox").addEventListener("change", function() {
@@ -324,10 +368,13 @@
     function queryDataByYearAndMonths(year, months) {
       const monthList = months.map(m => m).join(",");
       const sqlQuery = `
-        SELECT substr(date, 6, 5) AS day_key,
-               AVG(tempf) AS avgTempF,
-               MAX(gdd) AS maxCumGDD,
-               MAX(dailyrainin) AS rainTotal
+        SELECT
+          substr(date, 6, 5) AS day_key,
+          MIN(tempf) AS minTempF,
+          MAX(tempf) AS maxTempF,
+          AVG(tempf) AS avgTempF,
+          MAX(gdd)  AS maxCumGDD,
+          MAX(dailyrainin) AS rainTotal
         FROM readings
         WHERE substr(date, 1, 4) = '${year}'
           AND cast(substr(date, 6, 2) as integer) IN (${monthList})
@@ -343,12 +390,36 @@
       return results;
     }
 
+    // --- Query Sunspots Data for a Specific Year and Selected Months ---
+    function querySunspotsDataByYearAndMonths(year, months) {
+      const monthList = months.join(",");
+      const sqlQuery = `
+        SELECT
+          substr(date, 6, 5) AS day_key,
+          daily_total AS sunspotCount
+        FROM sunspots
+        WHERE substr(date, 1, 4) = '${year}'
+          AND cast(substr(date, 6, 2) as integer) IN (${monthList})
+        ORDER BY day_key ASC;
+      `;
+      const stmt = db.prepare(sqlQuery);
+      const results = {};
+      while (stmt.step()) {
+        const row = stmt.getAsObject();
+        results[row.day_key] = row.sunspotCount;
+      }
+      stmt.free();
+      return results;
+    }
+
     // --- Process Queried Data ---
     function processYearlyData(rows) {
       const data = {};
       rows.forEach(r => {
         data[r.day_key] = {
-          avgTempF: parseFloat(r.avgTempF),
+          minTempF:  parseFloat(r.minTempF),
+          maxTempF:  parseFloat(r.maxTempF),
+          avgTempF:  parseFloat(r.avgTempF),
           maxCumGDD: parseFloat(r.maxCumGDD),
           rainTotal: parseFloat(r.rainTotal)
         };
@@ -447,7 +518,20 @@
       return `rgb(${r},${g},${b})`;
     }
 
-    // --- Generate Custom Legend ---
+    // --- Darken a given rgb color string by a given factor (0 to 1) ---
+    function darkenColor(rgbStr, factor) {
+      // Assumes rgbStr is in the format "rgb(r, g, b)"
+      const result = /rgb\((\d+),\s*(\d+),\s*(\d+)\)/.exec(rgbStr);
+      if (!result) {
+        return rgbStr;
+      }
+      let r = Math.floor(parseInt(result[1]) * factor);
+      let g = Math.floor(parseInt(result[2]) * factor);
+      let b = Math.floor(parseInt(result[3]) * factor);
+      return `rgb(${r},${g},${b})`;
+    }
+
+    // --- Generate Custom Legend with Toggle on Click ---
     function generateCustomLegend(chart) {
       const legendContainer = document.getElementById('legendContainer');
       legendContainer.innerHTML = '';
@@ -460,6 +544,8 @@
       datasets.forEach((ds, index) => {
         const legendItem = document.createElement('div');
         legendItem.className = 'legend-item';
+        // Set initial opacity based on dataset hidden flag.
+        legendItem.style.opacity = chart.data.datasets[index].hidden ? 0.5 : 1;
         let markerHTML = "";
         if (ds.type === "scatter") {
           markerHTML = `<span style="display:inline-block; width:12px; height:12px; background-color:${ds.borderColor}; border-radius:50%; margin-right:5px;"></span>`;
@@ -470,9 +556,13 @@
           markerHTML = `<span style="display:inline-block; width:12px; height:12px; background-color:${ds.backgroundColor}; margin-right:5px;"></span>`;
         }
         legendItem.innerHTML = markerHTML + ds.label;
+        legendItem.style.cursor = 'pointer';
         legendItem.onclick = function() {
-          chart.toggleDataVisibility(index);
+          // Toggle the dataset's hidden property.
+          chart.data.datasets[index].hidden = !chart.data.datasets[index].hidden;
           chart.update();
+          // Update the legend item's opacity accordingly.
+          legendItem.style.opacity = chart.data.datasets[index].hidden ? 0.5 : 1;
         };
         legendList.appendChild(legendItem);
       });
@@ -498,44 +588,108 @@
       });
       const commonLabels = Array.from(commonLabelsSet).sort();
 
+      // Build datasets from readings data
       let datasets = [];
       selectedYears.forEach(year => {
         const dataForYear = yearlyData[year];
-        const tempData = alignData(commonLabels, dataForYear, "avgTempF");
-        const gddData = alignData(commonLabels, dataForYear, "maxCumGDD");
-        const rainData = alignData(commonLabels, dataForYear, "rainTotal");
-        const color1 = randomColor();
-        const color2 = randomColor();
-        const color3 = randomColor();
+        const minTempData = alignData(commonLabels, dataForYear, "minTempF");
+        const maxTempData = alignData(commonLabels, dataForYear, "maxTempF");
+        const avgTempData = alignData(commonLabels, dataForYear, "avgTempF");
+        const gddData     = alignData(commonLabels, dataForYear, "maxCumGDD");
+        const rainData    = alignData(commonLabels, dataForYear, "rainTotal");
+
+        // --- Temperature Display: Create a semi-transparent band for min/max and a solid average line ---
+        const rawTempColor = randomColor();
+        const bandFillColor = rawTempColor.replace("rgb(", "rgba(").replace(")", ",0.3)");
+        const colorAvg = darkenColor(rawTempColor, 0.5);
+
+        // 1) Min Temp (lower boundary of the band; no outline)
         datasets.push({
-          label: "Daily Avg Temp (°F) - " + year,
-          data: tempData,
-          borderColor: color1,
-          backgroundColor: 'transparent',
+          label: `Min Temp (°F) - ${year}`,
+          data: minTempData,
+          borderColor: 'transparent',
+          backgroundColor: bandFillColor,
+          borderWidth: 0,
           yAxisID: "y",
+          type: 'line',
+          fill: false,
+          tension: 0.4,
+          pointRadius: 0,
+          order: 1
+        });
+
+        // 2) Max Temp (upper boundary of the band; fills down to min using fill: '-1')
+        datasets.push({
+          label: `Max Temp (°F) - ${year}`,
+          data: maxTempData,
+          borderColor: 'transparent',
+          backgroundColor: bandFillColor,
+          borderWidth: 0,
+          yAxisID: "y",
+          type: 'line',
+          fill: '-1',
+          tension: 0.4,
+          pointRadius: 0,
+          order: 2
+        });
+
+        // 3) Average Temp (solid line on top; darker version of the same base color)
+        datasets.push({
+          label: `Avg Temp (°F) - ${year}`,
+          data: avgTempData,
+          borderColor: colorAvg,
+          backgroundColor: 'transparent',
+          borderWidth: 2,
+          yAxisID: "y",
+          type: 'line',
+          fill: false,
           tension: 0.4,
           pointRadius: 3,
-          fill: false,
-          type: 'line'
+          order: 3
         });
+
+        // 4) Cumulative GDD line
         datasets.push({
           label: "Cumulative GDD - " + year,
           data: gddData,
-          borderColor: color2,
+          borderColor: randomColor(),
           backgroundColor: 'transparent',
           yAxisID: "y1",
           tension: 0.4,
           pointRadius: 2,
           borderDash: [10, 5],
           fill: false,
-          type: 'line'
+          type: 'line',
+          order: 4
         });
+
+        // 5) Daily Rain bar
         datasets.push({
           label: "Daily Rain Total (in) - " + year,
           data: rainData,
-          backgroundColor: color3,
+          backgroundColor: randomColor(),
           yAxisID: "y2",
-          type: 'bar'
+          type: 'bar',
+          order: 5
+        });
+      });
+
+      // --- Add Sunspots Data ---
+      // For each selected year, query sunspots and align by the common day_key (MM-DD)
+      selectedYears.forEach(year => {
+        const sunspotData = querySunspotsDataByYearAndMonths(year, selectedMonths);
+        const sunspotsAligned = commonLabels.map(label => sunspotData[label] !== undefined ? sunspotData[label] : null);
+        datasets.push({
+          label: "Sunspots Daily Total - " + year,
+          data: sunspotsAligned,
+          borderColor: "purple",
+          backgroundColor: "transparent",
+          yAxisID: "y3",
+          type: "line",
+          tension: 0.4,
+          pointRadius: 2,
+          borderWidth: 2,
+          order: 6
         });
       });
 
@@ -543,7 +697,10 @@
       const budBreakDatasets = computeBudBreakPoints(selectedYears, commonLabels, yearlyData);
       datasets = datasets.concat(budBreakDatasets);
 
+      // Destroy existing chart if present
       if (dailyChart) dailyChart.destroy();
+
+      // Create new Chart with added y3 scale for sunspots
       const ctx = document.getElementById('dailyChart').getContext('2d');
       dailyChart = new Chart(ctx, {
         type: 'line',
@@ -557,10 +714,10 @@
           plugins: {
             title: {
               display: true,
-              text: "Daily Avg Temp, Cumulative GDD, Daily Rain Totals & Bud Break (Overlayed by Year)"
+              text: "Daily Avg Temp (with Min/Max Band), Cumulative GDD, Daily Rain, Bud Break & Sunspots"
             },
             legend: {
-              display: false  // We are using a custom legend below.
+              display: false  // We use a custom legend below
             }
           },
           scales: {
@@ -584,10 +741,17 @@
               title: { display: true, text: "Rain Total (in)" },
               grid: { drawOnChartArea: false },
               offset: true
+            },
+            y3: {
+              position: "right",
+              title: { display: true, text: "Sunspots Daily Total" },
+              grid: { drawOnChartArea: false },
+              offset: true
             }
           }
         }
       });
+
       generateCustomLegend(dailyChart);
     }
 

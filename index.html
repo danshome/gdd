@@ -101,12 +101,13 @@
       display: block;
       margin: 5px 0;
     }
-    /* Custom legend container styling */
+    /* Custom legend container styling for the bottom legend */
     #legendContainer {
       display: flex;
+      flex-direction: row;
       flex-wrap: wrap;
-      justify-content: center;
-      gap: 8px;
+      align-items: flex-start;
+      gap: 15px;
       padding: 5px;
       box-sizing: border-box;
     }
@@ -147,6 +148,7 @@
       <div id="leftPanel">
         <h3>Select Months</h3>
         <div id="monthControls">
+          <label><input type="checkbox" id="allMonths" checked> All Months</label>
           <label><input type="checkbox" name="month" value="1" checked> January</label>
           <label><input type="checkbox" name="month" value="2" checked> February</label>
           <label><input type="checkbox" name="month" value="3" checked> March</label>
@@ -160,19 +162,21 @@
           <label><input type="checkbox" name="month" value="11" checked> November</label>
           <label><input type="checkbox" name="month" value="12" checked> December</label>
         </div>
+        <!-- Container for Grape Varietal legend items (left justified) -->
+        <div id="grapeVarietalLegend"></div>
       </div>
       <!-- Chart Container -->
       <div id="chartContainer">
         <h2>Daily Avg Temp, Cumulative GDD, Daily Rain & Bud Break</h2>
         <canvas id="dailyChart"></canvas>
-        <!-- Custom legend will be generated here -->
+        <!-- Bottom legend container for non–grape–varietal groups -->
         <div id="legendContainer"></div>
       </div>
       <!-- Right slide-out panel for Year Filters -->
       <div id="rightPanel">
         <h3>Select Years</h3>
         <div id="yearControls">
-          <!-- Dynamically populated once after DB load -->
+          <!-- Dynamic year checkboxes will be inserted here -->
         </div>
       </div>
     </div>
@@ -182,7 +186,6 @@
     // Global auto-refresh settings
     let autoRefresh = true;
     let refreshIntervalId = null;
-    // Set the auto-refresh period (milliseconds)
     const AUTO_REFRESH_PERIOD = 60000; // 60 seconds
 
     // Sample event flags for years (modify as needed)
@@ -255,14 +258,12 @@
 
     // --- Save and Load Filter Settings from localStorage ---
     function saveFilterSettings() {
-      // Save month selections
       const monthCheckboxes = document.querySelectorAll("input[name='month']");
       const selectedMonths = Array.from(monthCheckboxes)
                                   .filter(cb => cb.checked)
                                   .map(cb => cb.value);
       localStorage.setItem("selectedMonths", JSON.stringify(selectedMonths));
 
-      // Save year selections
       const yearCheckboxes = document.querySelectorAll("input[name='year']");
       const selectedYears = Array.from(yearCheckboxes)
                                   .filter(cb => cb.checked)
@@ -271,21 +272,25 @@
     }
 
     function loadFilterSettings() {
-      // Load and apply month selections
       const storedMonths = localStorage.getItem("selectedMonths");
       if (storedMonths) {
         const selectedMonths = JSON.parse(storedMonths);
         document.querySelectorAll("input[name='month']").forEach(cb => {
           cb.checked = selectedMonths.includes(cb.value);
         });
+        const allChecked = Array.from(document.querySelectorAll("input[name='month']")).every(cb => cb.checked);
+        const allMonthsCb = document.getElementById("allMonths");
+        if (allMonthsCb) allMonthsCb.checked = allChecked;
       }
-      // Load and apply year selections
       const storedYears = localStorage.getItem("selectedYears");
       if (storedYears) {
         const selectedYears = JSON.parse(storedYears);
         document.querySelectorAll("input[name='year']").forEach(cb => {
           cb.checked = selectedYears.includes(cb.value);
         });
+        const allChecked = Array.from(document.querySelectorAll("input[name='year']")).every(cb => cb.checked);
+        const allYearsCb = document.getElementById("allYears");
+        if (allYearsCb) allYearsCb.checked = allChecked;
       }
     }
 
@@ -314,26 +319,58 @@
       .then(buffer => {
         db = new SQL.Database(new Uint8Array(buffer));
         log("Database loaded successfully.");
-        // Populate the year checkboxes once (do not refresh these on every auto refresh)
         populateYearControls();
-        // After the year checkboxes have been populated, load saved filter settings
         loadFilterSettings();
         loadAndPlotData();
         startAutoRefresh();
+
         // Attach event listeners to filters.
         document.querySelectorAll("input[name='year']").forEach(cb => {
           cb.addEventListener("change", function() {
+            let allChecked = true;
+            document.querySelectorAll("input[name='year']").forEach(box => {
+              if (!box.checked) { allChecked = false; }
+            });
+            const allYearsCb = document.getElementById("allYears");
+            if (allYearsCb) allYearsCb.checked = allChecked;
             saveFilterSettings();
             loadAndPlotData();
           });
         });
+        const allYearsCb = document.getElementById("allYears");
+        if (allYearsCb) {
+          allYearsCb.addEventListener("change", function() {
+            const newState = this.checked;
+            document.querySelectorAll("input[name='year']").forEach(cb => {
+              cb.checked = newState;
+            });
+            saveFilterSettings();
+            loadAndPlotData();
+          });
+        }
         document.querySelectorAll("input[name='month']").forEach(cb => {
           cb.addEventListener("change", function() {
+            let allChecked = true;
+            document.querySelectorAll("input[name='month']").forEach(box => {
+              if (!box.checked) { allChecked = false; }
+            });
+            const allMonthsCb = document.getElementById("allMonths");
+            if (allMonthsCb) allMonthsCb.checked = allChecked;
             saveFilterSettings();
             loadAndPlotData();
           });
         });
-        // Attach event listener to auto refresh toggle.
+        const allMonthsCb = document.getElementById("allMonths");
+        if (allMonthsCb) {
+          allMonthsCb.addEventListener("change", function() {
+            const newState = this.checked;
+            document.querySelectorAll("input[name='month']").forEach(cb => {
+              cb.checked = newState;
+            });
+            saveFilterSettings();
+            loadAndPlotData();
+          });
+        }
         document.getElementById("autoRefreshCheckbox").addEventListener("change", function() {
           autoRefresh = this.checked;
           log("Auto Refresh is now " + (autoRefresh ? "enabled" : "disabled"));
@@ -350,6 +387,9 @@
       const res = db.exec("SELECT DISTINCT substr(date, 1, 4) as year FROM readings ORDER BY year ASC;");
       const yearControls = document.getElementById("yearControls");
       yearControls.innerHTML = "";
+      const allYearsLabel = document.createElement("label");
+      allYearsLabel.innerHTML = `<input type="checkbox" id="allYears" checked> All Years`;
+      yearControls.appendChild(allYearsLabel);
       if (res.length > 0) {
         const years = res[0].values.map(row => row[0]);
         years.forEach(year => {
@@ -452,7 +492,7 @@
             const record = dataForYear[dayKey];
             if (record && record.maxCumGDD >= threshold) {
               budBreakByVariety[variety].push({ x: dayKey, y: record.maxCumGDD, year: year });
-              break; // One bud break point per year per variety.
+              break;
             }
           }
         });
@@ -520,7 +560,6 @@
 
     // --- Darken a given rgb color string by a given factor (0 to 1) ---
     function darkenColor(rgbStr, factor) {
-      // Assumes rgbStr is in the format "rgb(r, g, b)"
       const result = /rgb\((\d+),\s*(\d+),\s*(\d+)\)/.exec(rgbStr);
       if (!result) {
         return rgbStr;
@@ -533,40 +572,114 @@
 
     // --- Generate Custom Legend with Toggle on Click ---
     function generateCustomLegend(chart) {
+      // Get the bottom legend container (for non–grape–varietal groups).
       const legendContainer = document.getElementById('legendContainer');
       legendContainer.innerHTML = '';
-      const datasets = chart.data.datasets;
-      const legendList = document.createElement('div');
-      legendList.style.display = 'flex';
-      legendList.style.flexWrap = 'wrap';
-      legendList.style.justifyContent = 'center';
-      legendList.style.gap = '8px';
-      datasets.forEach((ds, index) => {
-        const legendItem = document.createElement('div');
-        legendItem.className = 'legend-item';
-        // Set initial opacity based on dataset hidden flag.
-        legendItem.style.opacity = chart.data.datasets[index].hidden ? 0.5 : 1;
-        let markerHTML = "";
-        if (ds.type === "scatter") {
-          markerHTML = `<span style="display:inline-block; width:12px; height:12px; background-color:${ds.borderColor}; border-radius:50%; margin-right:5px;"></span>`;
-        } else if (ds.type === "line") {
-          const dash = ds.borderDash && ds.borderDash.length > 0 ? "dashed" : "solid";
-          markerHTML = `<span style="display:inline-block; width:20px; border-bottom:2px ${dash} ${ds.borderColor}; margin-right:5px;"></span>`;
-        } else if (ds.type === "bar") {
-          markerHTML = `<span style="display:inline-block; width:12px; height:12px; background-color:${ds.backgroundColor}; margin-right:5px;"></span>`;
-        }
-        legendItem.innerHTML = markerHTML + ds.label;
-        legendItem.style.cursor = 'pointer';
-        legendItem.onclick = function() {
-          // Toggle the dataset's hidden property.
-          chart.data.datasets[index].hidden = !chart.data.datasets[index].hidden;
-          chart.update();
-          // Update the legend item's opacity accordingly.
-          legendItem.style.opacity = chart.data.datasets[index].hidden ? 0.5 : 1;
-        };
-        legendList.appendChild(legendItem);
+
+      // Get the container for grape varietals from the left panel.
+      const grapeVarietalContainer = document.getElementById('grapeVarietalLegend');
+      if (grapeVarietalContainer) grapeVarietalContainer.innerHTML = '';
+
+      // Helper: Determine the legend category from the dataset label.
+      function getLegendCategory(label) {
+        if (label.includes("Min Temp") || label.includes("Max Temp")) return "Min/Max Temp";
+        if (label.includes("Avg Temp")) return "Avg Temperature";
+        if (label.includes("Cumulative GDD")) return "Cumulative GDD";
+        if (label.includes("Daily Rain Total")) return "Daily Rain Totals";
+        if (label.includes("Sunspots Daily Total")) return "Sunspot Daily Total";
+        return "Grape Varietal";
+      }
+
+      // Group datasets by category.
+      const groups = {};
+      chart.data.datasets.forEach((ds, index) => {
+        const cat = getLegendCategory(ds.label);
+        if (!groups[cat]) groups[cat] = [];
+        groups[cat].push({ ds, index });
       });
-      legendContainer.appendChild(legendList);
+
+      // Iterate over each group.
+      Object.keys(groups).forEach(category => {
+        if (category === "Grape Varietal") {
+          // Grape Varietal: append to grapeVarietalContainer (already left justified).
+          const header = document.createElement('div');
+          header.textContent = category;
+          header.style.fontWeight = 'bold';
+          header.style.marginTop = '10px';
+          header.style.textAlign = 'left';
+          grapeVarietalContainer.appendChild(header);
+
+          const groupDiv = document.createElement('div');
+          groupDiv.style.display = 'flex';
+          groupDiv.style.flexWrap = 'wrap';
+          groupDiv.style.gap = '8px';
+          groupDiv.style.justifyContent = 'flex-start';
+          groups[category].forEach(item => {
+            const { ds, index } = item;
+            const legendItem = document.createElement('div');
+            legendItem.className = 'legend-item';
+            legendItem.style.opacity = chart.data.datasets[index].hidden ? 0.5 : 1;
+            let markerHTML = "";
+            markerHTML = `<span style="display:inline-block; width:12px; height:12px; background-color:${ds.borderColor}; border-radius:50%; margin-right:5px;"></span>`;
+            legendItem.innerHTML = markerHTML + ds.label;
+            legendItem.style.cursor = 'pointer';
+            legendItem.onclick = function() {
+              chart.data.datasets[index].hidden = !chart.data.datasets[index].hidden;
+              chart.update();
+              legendItem.style.opacity = chart.data.datasets[index].hidden ? 0.5 : 1;
+            };
+            groupDiv.appendChild(legendItem);
+          });
+          grapeVarietalContainer.appendChild(groupDiv);
+        } else {
+          // For other groups, create a wrapper so that the groups are arranged from left to right.
+          const groupWrapper = document.createElement('div');
+          groupWrapper.style.display = "flex";
+          groupWrapper.style.flexDirection = "column";
+          groupWrapper.style.alignItems = "flex-start";
+          groupWrapper.style.marginRight = "15px"; // spacing between groups
+
+          const header = document.createElement('div');
+          header.textContent = category;
+          header.style.fontWeight = 'bold';
+          header.style.marginBottom = '5px';
+          header.style.textAlign = 'left';
+          groupWrapper.appendChild(header);
+
+          const groupDiv = document.createElement('div');
+          groupDiv.style.display = 'flex';
+          groupDiv.style.flexWrap = 'wrap';
+          groupDiv.style.gap = '8px';
+          groupDiv.style.justifyContent = 'flex-start';
+
+          groups[category].forEach(item => {
+            const { ds, index } = item;
+            const legendItem = document.createElement('div');
+            legendItem.className = 'legend-item';
+            legendItem.style.opacity = chart.data.datasets[index].hidden ? 0.5 : 1;
+            let markerHTML = "";
+            if (category === "Min/Max Temp" || category === "Avg Temperature") {
+              markerHTML = `<span style="display:inline-block; width:20px; border-bottom:2px solid ${ds.borderColor}; margin-right:5px;"></span>`;
+            } else if (category === "Cumulative GDD") {
+              markerHTML = `<span style="display:inline-block; width:20px; border-bottom:2px dashed ${ds.borderColor}; margin-right:5px;"></span>`;
+            } else if (category === "Daily Rain Totals") {
+              markerHTML = `<span style="display:inline-block; width:12px; height:12px; background-color:${ds.backgroundColor}; margin-right:5px;"></span>`;
+            } else if (category === "Sunspot Daily Total") {
+              markerHTML = `<span style="display:inline-block; width:12px; height:12px; background-color:purple; border-radius:50%; margin-right:5px;"></span>`;
+            }
+            legendItem.innerHTML = markerHTML + ds.label;
+            legendItem.style.cursor = 'pointer';
+            legendItem.onclick = function() {
+              chart.data.datasets[index].hidden = !chart.data.datasets[index].hidden;
+              chart.update();
+              legendItem.style.opacity = chart.data.datasets[index].hidden ? 0.5 : 1;
+            };
+            groupDiv.appendChild(legendItem);
+          });
+          groupWrapper.appendChild(groupDiv);
+          legendContainer.appendChild(groupWrapper);
+        }
+      });
     }
 
     // --- Load and Plot Data Automatically (Overlay Years) ---
@@ -588,7 +701,6 @@
       });
       const commonLabels = Array.from(commonLabelsSet).sort();
 
-      // Build datasets from readings data
       let datasets = [];
       selectedYears.forEach(year => {
         const dataForYear = yearlyData[year];
@@ -598,12 +710,10 @@
         const gddData     = alignData(commonLabels, dataForYear, "maxCumGDD");
         const rainData    = alignData(commonLabels, dataForYear, "rainTotal");
 
-        // --- Temperature Display: Create a semi-transparent band for min/max and a solid average line ---
         const rawTempColor = randomColor();
         const bandFillColor = rawTempColor.replace("rgb(", "rgba(").replace(")", ",0.3)");
         const colorAvg = darkenColor(rawTempColor, 0.5);
 
-        // 1) Min Temp (lower boundary of the band; no outline)
         datasets.push({
           label: `Min Temp (°F) - ${year}`,
           data: minTempData,
@@ -618,7 +728,6 @@
           order: 1
         });
 
-        // 2) Max Temp (upper boundary of the band; fills down to min using fill: '-1')
         datasets.push({
           label: `Max Temp (°F) - ${year}`,
           data: maxTempData,
@@ -633,7 +742,6 @@
           order: 2
         });
 
-        // 3) Average Temp (solid line on top; darker version of the same base color)
         datasets.push({
           label: `Avg Temp (°F) - ${year}`,
           data: avgTempData,
@@ -648,7 +756,6 @@
           order: 3
         });
 
-        // 4) Cumulative GDD line
         datasets.push({
           label: "Cumulative GDD - " + year,
           data: gddData,
@@ -663,7 +770,6 @@
           order: 4
         });
 
-        // 5) Daily Rain bar
         datasets.push({
           label: "Daily Rain Total (in) - " + year,
           data: rainData,
@@ -674,8 +780,6 @@
         });
       });
 
-      // --- Add Sunspots Data ---
-      // For each selected year, query sunspots and align by the common day_key (MM-DD)
       selectedYears.forEach(year => {
         const sunspotData = querySunspotsDataByYearAndMonths(year, selectedMonths);
         const sunspotsAligned = commonLabels.map(label => sunspotData[label] !== undefined ? sunspotData[label] : null);
@@ -693,14 +797,11 @@
         });
       });
 
-      // Compute bud break points (one dataset per grape variety across selected years)
       const budBreakDatasets = computeBudBreakPoints(selectedYears, commonLabels, yearlyData);
       datasets = datasets.concat(budBreakDatasets);
 
-      // Destroy existing chart if present
       if (dailyChart) dailyChart.destroy();
 
-      // Create new Chart with added y3 scale for sunspots
       const ctx = document.getElementById('dailyChart').getContext('2d');
       dailyChart = new Chart(ctx, {
         type: 'line',
@@ -717,7 +818,7 @@
               text: "Daily Avg Temp (with Min/Max Band), Cumulative GDD, Daily Rain, Bud Break & Sunspots"
             },
             legend: {
-              display: false  // We use a custom legend below
+              display: false
             }
           },
           scales: {
@@ -770,7 +871,6 @@
       if (dailyChart) dailyChart.resize();
     });
 
-    // Initial load (filters already exist from initial page load)
     window.onload = loadAndPlotData;
   </script>
 </body>

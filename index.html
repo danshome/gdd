@@ -5,8 +5,10 @@
     <title>Ambient Weather – Daily Avg Temp, Cumulative GDD, Daily Rain & Bud Break</title>
     <!-- Chart.js from CDN -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- Chart.js Zoom Plugin from CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.2.0/dist/chartjs-plugin-zoom.min.js"></script>
     <!-- sql.js from CDN -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.6.2/sql-wasm.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.12.0/sql-wasm.js"></script>
     <style>
         /* Remove default margins/padding for full-screen usage */
         body {
@@ -228,7 +230,7 @@
         "2025": ["Neutral", "Solar Max [10]"]
     };
 
-    // Custom Plugin: horizontalLinePlugin draws horizontal lines at 32°F, 50°F, and 89°F.
+    // Custom Plugin: horizontalLinePlugin draws horizontal lines at 32°F, 50°F, and 86°F.
     const horizontalLinePlugin = {
         id: 'horizontalLinePlugin',
         afterDraw(chart, args, options) {
@@ -253,7 +255,7 @@
 
             drawLine(32, 'green', 'Freeze (32°F)');
             drawLine(50, 'blue', 'Base Temp (50°F)');
-            drawLine(89, 'red', 'Ceiling Temp (89°F)');
+            drawLine(86, 'red', 'Ceiling Temp (86°F)');
         }
     };
     Chart.register(horizontalLinePlugin);
@@ -334,7 +336,7 @@
 
     // --- Initialize sql.js and load the database ---
     initSqlJs({
-        locateFile: file => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.6.2/${file}`
+        locateFile: file => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.12.0/${file}`
     }).then(function (SQLLib) {
         SQL = SQLLib;
         return fetch(DB_FILENAME);
@@ -535,7 +537,8 @@
                     type: 'scatter',
                     showLine: false,
                     order: 2,
-                    yAxisID: 'y1'
+                    yAxisID: 'y1',
+                    spanGaps: false
                 });
             }
         });
@@ -640,7 +643,6 @@
         // Iterate over each group.
         Object.keys(groups).forEach(category => {
             if (category === "Grape Varietal") {
-                // Append grape varietal group to the left panel.
                 const header = document.createElement('div');
                 header.textContent = category;
                 header.style.fontWeight = 'bold';
@@ -839,7 +841,8 @@
                 tension: 0.4,
                 pointRadius: 0,
                 order: 1,
-                hideInLegend: true
+                hideInLegend: true,
+                spanGaps: false
             });
             let indexMax = datasets.length;
             datasets.push({
@@ -854,7 +857,8 @@
                 tension: 0.4,
                 pointRadius: 0,
                 order: 2,
-                pairIndices: [indexMin, indexMax]
+                pairIndices: [indexMin, indexMax],
+                spanGaps: false
             });
 
             // Avg Temp dataset.
@@ -869,7 +873,8 @@
                 fill: false,
                 tension: 0.4,
                 pointRadius: 3,
-                order: 3
+                order: 3,
+                spanGaps: false
             });
 
             // Cumulative GDD dataset.
@@ -884,7 +889,8 @@
                 borderDash: [10, 5],
                 fill: false,
                 type: 'line',
-                order: 4
+                order: 4,
+                spanGaps: false
             });
 
             // Daily Rain dataset.
@@ -894,7 +900,8 @@
                 backgroundColor: randomColor(),
                 yAxisID: "y2",
                 type: 'bar',
-                order: 5
+                order: 5,
+                spanGaps: false
             });
         });
 
@@ -911,7 +918,8 @@
                 tension: 0.4,
                 pointRadius: 2,
                 borderWidth: 2,
-                order: 6
+                order: 6,
+                spanGaps: false
             });
         });
 
@@ -937,6 +945,29 @@
                     },
                     legend: {
                         display: false
+                    },
+                    // --- Interactive Zoom & Pan Options ---
+                    zoom: {
+                        // Enable zooming via the mouse wheel and pinch (for touch devices)
+                        zoom: {
+                            wheel: {
+                                enabled: true,
+                                speed: 0.1 // Adjust the zoom speed as needed
+                            },
+                            pinch: {
+                                enabled: true
+                            },
+                            // Disable drag zooming so that dragging pans the chart instead
+                            drag: {
+                                enabled: false
+                            },
+                            mode: 'x'
+                        },
+                        // Enable panning via mouse drag (click and drag)
+                        pan: {
+                            enabled: true,
+                            mode: 'x'
+                        }
                     }
                 },
                 scales: {

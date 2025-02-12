@@ -1,6 +1,9 @@
 import configparser
+import os
 import sqlite3
 import time
+from io import StringIO
+
 import requests
 import csv
 from datetime import datetime, timedelta, timezone
@@ -153,88 +156,146 @@ CREATE TABLE IF NOT EXISTS sunspots (
 """)
 conn.commit()
 
-with open("SN_d_tot_V2.0.csv", "r", newline='') as csvfile:
-    reader = csv.reader(csvfile, delimiter=";")
-    # Skip header row (assumes one exists)
-    header = next(reader)
-    for row in reader:
-        # Ensure there are at least 8 columns.
-        if len(row) < 8:
-            continue
+sunspot_url = "https://www.sidc.be/SILSO/INFO/sndtotcsv.php?"
+local_file = "SN_d_tot_V2.0.csv"
+
+# First, perform a HEAD request to get the remote file's Last-Modified header.
+head_response = requests.head(sunspot_url)
+remote_last_modified = None
+if head_response.status_code == 200:
+    remote_last_modified_str = head_response.headers.get("Last-Modified")
+    if remote_last_modified_str:
         try:
-            year = int(row[0])
-        except Exception:
-            continue
-        # Only import data from 2010 onward.
-        if year < 2010:
-            continue
-        try:
-            month = int(row[1])
-            day = int(row[2])
-        except Exception:
-            continue
-        try:
-            fraction = float(row[3])
-        except Exception:
-            fraction = None
-        try:
-            daily_total = int(row[4])
-            # A daily_total value of -1 indicates missing data.
-            if daily_total == -1:
-                daily_total = None
-        except Exception:
+            # Use timezone-aware datetime
+            remote_last_modified = datetime.strptime(remote_last_modified_str, "%a, %d %b %Y %H:%M:%S GMT").replace(tzinfo=timezone.utc)
+        except Exception as ex:
+            log(f"Error parsing remote Last-Modified header: {ex}")
+
+download_file = True
+if remote_last_modified and os.path.exists(local_file):
+    local_mod_timestamp = os.path.getmtime(local_file)
+    local_mod_datetime = datetime.fromtimestamp(local_mod_timestamp, timezone.utc)
+    if remote_last_modified <= local_mod_datetime:
+        log("Sunspot CSV has not changed; skipping download.")
+        download_file = False
+
+if download_file:
+    response = requests.get(sunspot_url)
+    if response.status_code == 200:
+        # Write the updated CSV to the local file.
+        with open(local_file, "w", newline="") as f:
+            f.write(response.text)
+        log("Sunspot data updated from SIDC.")
+    else:
+        log(f"Failed to fetch sunspot data. HTTP Status Code: {response.status_code}")
+
+# Now load and process the CSV data from the local file.
+with open(local_file, "r", newline="") as f:
+    csv_data = f.read()
+
+csvfile = StringIO(csv_data)
+reader = csv.reader(csvfile, delimiter=";")
+header = next(reader)  # Skip header row
+
+for row in reader:
+    # Ensure there are at least 8 columns.
+    if len(row) < 8:
+        continue
+    try:
+        year = int(row[0])
+    except Exception:
+        continue
+    # Only import data from 2010 onward.
+    if year < 2010:
+        continue
+    try:
+        month = int(row[1])
+        day = int(row[2])
+    except Exception:
+        continue
+    try:
+        fraction = float(row[3])
+    except Exception:
+        fraction = None
+    try:
+        daily_total = int(row[4])
+        if daily_total == -1:
             daily_total = None
-        try:
-            std_dev = float(row[5])
-        except Exception:
-            std_dev = None
-        try:
-            num_obs = int(row[6])
-        except Exception:
-            num_obs = None
-        try:
-            definitive = int(row[7])
-        except Exception:
-            definitive = None
-        # Create a simple date string for reference.
-        date_str = f"{year:04d}-{month:02d}-{day:02d}"
-        cursor.execute("""
-            INSERT OR REPLACE INTO sunspots (year, month, day, fraction, daily_total, std_dev, num_obs, definitive, date)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (year, month, day, fraction, daily_total, std_dev, num_obs, definitive, date_str))
+    except Exception:
+        daily_total = None
+    try:
+        std_dev = float(row[5])
+    except Exception:
+        std_dev = None
+    try:
+        num_obs = int(row[6])
+    except Exception:
+        num_obs = None
+    try:
+        definitive = int(row[7])
+    except Exception:
+        definitive = None
+    date_str = f"{year:04d}-{month:02d}-{day:02d}"
+    cursor.execute("""
+        INSERT OR REPLACE INTO sunspots 
+        (year, month, day, fraction, daily_total, std_dev, num_obs, definitive, date)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (year, month, day, fraction, daily_total, std_dev, num_obs, definitive, date_str))
 conn.commit()
 
+# Log a message once after processing is complete.
+log("Sunspot CSV processed from local file.")
+
 # === Function: Recalculate Cumulative, Hourly, and Daily GDD ===
-def recalcGDD():
-    log("Recalculating cumulative GDD using incremental updates...")
+def recalcGDD(full=False):
+    """
+    Recalculates cumulative GDD values.
+
+    Modes:
+      - Incremental (full=False, default): For each year, only update rows after the last calculated value.
+      - Full (full=True): For each year, start at the beginning and recalculate GDD for all rows.
+    """
+    if full:
+        log("Performing full GDD recalculation from the beginning...")
+    else:
+        log("Performing incremental GDD recalculation...")
+
     # Get all distinct years present in the readings table.
     cursor.execute("SELECT DISTINCT substr(date, 1, 4) as year FROM readings ORDER BY year ASC")
     years = [row[0] for row in cursor.fetchall()]
 
     for year in years:
-        # Try to get the last calculated cumulative GDD for this year.
-        cursor.execute(
-            "SELECT MAX(dateutc), gdd FROM readings WHERE substr(date, 1, 4)=? AND gdd>0",
-            (year,)
-        )
-        result = cursor.fetchone()
-        if result[0] is not None:
-            last_dateutc = result[0]
-            cumulative_gdd = result[1]
-            log(f"For year {year}, starting incremental recalculation from dateutc {last_dateutc} with cumulative GDD {cumulative_gdd:.3f}.")
-            # Process only rows after the last recalculated timestamp.
-            cursor.execute(
-                "SELECT dateutc, tempf, date FROM readings WHERE substr(date, 1, 4)=? AND dateutc > ? ORDER BY dateutc ASC",
-                (year, last_dateutc)
-            )
-        else:
-            # No previous GDD value exists for this year; recalc from the beginning.
+        if full:
             cumulative_gdd = 0
-            log(f"For year {year}, no previous GDD found. Recalculating from start.")
+            log(f"For year {year}, starting full recalculation from beginning with cumulative GDD {cumulative_gdd:.3f}.")
+            # Process every row for the year from the start.
             cursor.execute(
                 "SELECT dateutc, tempf, date FROM readings WHERE substr(date, 1, 4)=? ORDER BY dateutc ASC",
                 (year,)
             )
+        else:
+            # Try to get the last calculated cumulative GDD for this year.
+            cursor.execute(
+                "SELECT MAX(dateutc), gdd FROM readings WHERE substr(date, 1, 4)=? AND gdd>0",
+                (year,)
+            )
+            result = cursor.fetchone()
+            if result[0] is not None:
+                last_dateutc = result[0]
+                cumulative_gdd = result[1]
+                log(f"For year {year}, starting incremental recalculation from dateutc {last_dateutc} with cumulative GDD {cumulative_gdd:.3f}.")
+                # Process only rows after the last recalculated timestamp.
+                cursor.execute(
+                    "SELECT dateutc, tempf, date FROM readings WHERE substr(date, 1, 4)=? AND dateutc > ? ORDER BY dateutc ASC",
+                    (year, last_dateutc)
+                )
+            else:
+                cumulative_gdd = 0
+                log(f"For year {year}, no previous GDD found. Recalculating from start.")
+                cursor.execute(
+                    "SELECT dateutc, tempf, date FROM readings WHERE substr(date, 1, 4)=? ORDER BY dateutc ASC",
+                    (year,)
+                )
 
         rows = cursor.fetchall()
         for dateutc, tempf, date_str in rows:
@@ -252,7 +313,11 @@ def recalcGDD():
             cumulative_gdd += inc
             cursor.execute("UPDATE readings SET gdd = ? WHERE dateutc = ?", (cumulative_gdd, dateutc))
     conn.commit()
-    log("Cumulative GDD recalculation complete.")
+
+    if full:
+        log("Full GDD recalculation complete.")
+    else:
+        log("Incremental GDD recalculation complete.")
 
 
 # === Fetch Data from Ambient Weather API ===
@@ -668,8 +733,12 @@ while day < CURRENT_DATE:
     day = day + timedelta(days=1)
 
 # --- Final Recalculation of GDD ---
-log("Performing final recalculation of cumulative, hourly, and daily GDD...")
-recalcGDD()
+log("Clearing all GDD values before full recalculation...")
+cursor.execute("UPDATE readings SET gdd = NULL")
+conn.commit()
+
+log("Performing final full recalculation of cumulative, hourly, and daily GDD...")
+recalcGDD(full=True)
 conn.commit()
 conn.close()
 log("Data retrieval complete. Added " + str(new_total) + " new primary readings in total.")

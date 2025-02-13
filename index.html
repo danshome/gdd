@@ -881,7 +881,7 @@
             datasets.push({
                 label: "Cumulative GDD - " + year,
                 data: gddData,
-                borderColor: randomColor(),
+                borderColor: (parseInt(year) === new Date().getFullYear()) ? "red" : randomColor(),
                 backgroundColor: 'transparent',
                 yAxisID: "y1",
                 tension: 0.4,
@@ -948,22 +948,19 @@
                     },
                     // --- Interactive Zoom & Pan Options ---
                     zoom: {
-                        // Enable zooming via the mouse wheel and pinch (for touch devices)
                         zoom: {
                             wheel: {
                                 enabled: true,
-                                speed: 0.1 // Adjust the zoom speed as needed
+                                speed: 0.1
                             },
                             pinch: {
                                 enabled: true
                             },
-                            // Disable drag zooming so that dragging pans the chart instead
                             drag: {
                                 enabled: false
                             },
                             mode: 'x'
                         },
-                        // Enable panning via mouse drag (click and drag)
                         pan: {
                             enabled: true,
                             mode: 'x'

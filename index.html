@@ -18,12 +18,10 @@
             padding: 0;
             overflow-x: hidden;
         }
-
         h1, h2, h3 {
             text-align: center;
             margin: 10px 0;
         }
-
         /* Toggle buttons for slide-out panels */
         #toggleLeftPanel, #toggleRightPanel {
             position: fixed;
@@ -36,21 +34,17 @@
             padding: 8px 12px;
             cursor: pointer;
         }
-
         #toggleLeftPanel {
             left: 0;
         }
-
         #toggleRightPanel {
             right: 0;
         }
-
         /* Auto Refresh Toggle Control */
         #autoRefreshControl {
             text-align: center;
             margin: 10px 0;
         }
-
         /* Flex container for panels and chart */
         .flex-container {
             display: flex;
@@ -60,7 +54,6 @@
             box-sizing: border-box;
             transition: margin 0.3s ease;
         }
-
         /* Left slide-out panel (months) */
         #leftPanel {
             width: fit-content;
@@ -70,13 +63,11 @@
             padding: 10px;
             text-align: left;
         }
-
         #leftPanel.hidden {
             width: 0;
             padding: 0;
             overflow: hidden;
         }
-
         /* Right slide-out panel (years) */
         #rightPanel {
             width: fit-content;
@@ -86,21 +77,19 @@
             padding: 10px;
             text-align: right;
         }
-
         #rightPanel.hidden {
             width: 0;
             padding: 0;
             overflow: hidden;
         }
-
         /* Chart container fills remaining space */
         #chartContainer {
+            position: relative;  /* Added to allow absolute positioning inside */
             flex: 1;
             padding: 10px;
             box-sizing: border-box;
             height: 80vh; /* 80% of viewport height */
         }
-
         /* Ensure the canvas fills its container */
         canvas {
             background: #fff;
@@ -110,13 +99,11 @@
             height: 100% !important;
             display: block;
         }
-
         /* Ensure the checkboxes are stacked */
         #monthControls label, #yearControls label {
             display: block;
             margin: 5px 0;
         }
-
         /* Custom legend container styling for the bottom legend */
         #legendContainer {
             display: flex;
@@ -127,7 +114,6 @@
             padding: 5px;
             box-sizing: border-box;
         }
-
         /* Updated legend item style for bottom legend (no button look) */
         #legendContainer .legend-item {
             display: inline-flex;
@@ -140,6 +126,18 @@
             border: none;
             border-radius: 0;
             cursor: pointer;
+        }
+        /* Tooltip for vertical line labels */
+        #vlineTooltip {
+            position: absolute;
+            display: none;
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            pointer-events: none;
+            z-index: 2000;
         }
     </style>
 </head>
@@ -187,6 +185,8 @@
         </div>
         <!-- Chart Container -->
         <div id="chartContainer">
+            <!-- NEW: Export to PNG Button in top right -->
+            <button id="exportButton" style="position: absolute; top: 10px; right: 10px; z-index: 1000; padding: 10px 20px; font-size: 16px; cursor: pointer;">Export Chart to PNG</button>
             <h2>Daily Avg Temp, Cumulative GDD, Daily Rain & Bud Break</h2>
             <canvas id="dailyChart"></canvas>
             <!-- Bottom legend container for non–grape–varietal groups -->
@@ -201,6 +201,9 @@
         </div>
     </div>
 </div>
+
+<!-- Tooltip element for vertical line labels -->
+<div id="vlineTooltip"></div>
 
 <script>
     // Global auto-refresh settings
@@ -236,7 +239,6 @@
         afterDraw(chart, args, options) {
             const {ctx, chartArea: {left, right}, scales: {y}} = chart;
             if (!y) return;
-
             function drawLine(yValue, color, text) {
                 const yPixel = y.getPixelForValue(yValue);
                 ctx.save();
@@ -252,7 +254,6 @@
                 ctx.font = '12px Arial';
                 ctx.fillText(text, left + 5, yPixel - 5);
             }
-
             drawLine(32, 'green', 'Freeze (32°F)');
             drawLine(50, 'blue', 'Base Temp (50°F)');
             drawLine(86, 'red', 'Ceiling Temp (86°F)');
@@ -260,16 +261,42 @@
     };
     Chart.register(horizontalLinePlugin);
 
+    // --- NEW: Custom Plugin: verticalLinePlugin (draws only lines)
+    const verticalLinePlugin = {
+        id: 'verticalLinePlugin',
+        afterDraw(chart, args, options) {
+            // Only draw vertical lines if current year is selected.
+            const currentYear = String(new Date().getFullYear());
+            if (!selectedYears || !selectedYears.includes(currentYear)) return;
+            const ctx = chart.ctx;
+            const xScale = chart.scales.x;
+            if (!options.lines) return;
+            options.lines.forEach(line => {
+                const xPixel = xScale.getPixelForValue(line.xLabel);
+                if (xPixel === undefined || isNaN(xPixel)) return;
+                ctx.save();
+                ctx.beginPath();
+                ctx.moveTo(xPixel, chart.chartArea.top);
+                ctx.lineTo(xPixel, chart.chartArea.bottom);
+                ctx.lineWidth = line.lineWidth || 2;
+                ctx.strokeStyle = line.color || "red";
+                ctx.stroke();
+                ctx.restore();
+            });
+        }
+    };
+    Chart.register(verticalLinePlugin);
+
     let db = null;
     let dailyChart;
     let SQL;
+    let selectedYears = []; // Global array for selected years
 
     // --- Helper Functions for Logging ---
     function log(message) {
         const now = new Date().toISOString().replace("T", " ").replace("Z", "");
         console.log("[" + now + "] " + message);
     }
-
     function log_debug(message) {
         if (DEBUG) {
             log("[DEBUG] " + message);
@@ -287,14 +314,12 @@
             .filter(cb => cb.checked)
             .map(cb => cb.value);
         localStorage.setItem("selectedMonths", JSON.stringify(selectedMonths));
-
         const yearCheckboxes = document.querySelectorAll("input[name='year']");
-        const selectedYears = Array.from(yearCheckboxes)
+        const selYears = Array.from(yearCheckboxes)
             .filter(cb => cb.checked)
             .map(cb => cb.value);
-        localStorage.setItem("selectedYears", JSON.stringify(selectedYears));
+        localStorage.setItem("selectedYears", JSON.stringify(selYears));
     }
-
     function loadFilterSettings() {
         const storedMonths = localStorage.getItem("selectedMonths");
         if (storedMonths) {
@@ -308,7 +333,7 @@
         }
         const storedYears = localStorage.getItem("selectedYears");
         if (storedYears) {
-            const selectedYears = JSON.parse(storedYears);
+            selectedYears = JSON.parse(storedYears);
             document.querySelectorAll("input[name='year']").forEach(cb => {
                 cb.checked = selectedYears.includes(cb.value);
             });
@@ -325,7 +350,6 @@
             log("Auto Refresh started (every " + (AUTO_REFRESH_PERIOD / 1000) + " seconds).");
         }
     }
-
     function stopAutoRefresh() {
         if (refreshIntervalId) {
             clearInterval(refreshIntervalId);
@@ -348,8 +372,6 @@
             loadFilterSettings();
             loadAndPlotData();
             startAutoRefresh();
-
-            // Attach event listeners to filters.
             document.querySelectorAll("input[name='year']").forEach(cb => {
                 cb.addEventListener("change", function () {
                     let allChecked = true;
@@ -499,7 +521,7 @@
         return commonLabels.map(label => dataByDay[label] ? dataByDay[label][field] : null);
     }
 
-    // --- Compute Bud Break Points Grouped by Variety ---
+    // --- Compute Bud Break Points Grouped by Variety (Scatter Points) ---
     function computeBudBreakPoints(selectedYears, commonLabels, yearlyData) {
         const result = db.exec("SELECT variety, heat_summation FROM grapevine_gdd ORDER BY variety");
         if (result.length === 0) return [];
@@ -603,22 +625,17 @@
         const stored = localStorage.getItem("legendGroupStates");
         return stored ? JSON.parse(stored) : {};
     }
-
     function saveLegendGroupStates(states) {
         localStorage.setItem("legendGroupStates", JSON.stringify(states));
     }
 
     // --- Generate Custom Legend with Toggle on Click ---
     function generateCustomLegend(chart) {
-        // Get the bottom legend container (for non–grape–varietal groups).
         const legendContainer = document.getElementById('legendContainer');
         legendContainer.innerHTML = '';
-
-        // Get the container for grape varietals from the left panel.
         const grapeVarietalContainer = document.getElementById('grapeVarietalLegend');
         if (grapeVarietalContainer) grapeVarietalContainer.innerHTML = '';
 
-        // Helper: Determine the legend category from the dataset label.
         function getLegendCategory(label) {
             if (label.includes("Min Temp") || label.includes("Max Temp")) return "Min/Max Temp";
             if (label.includes("Avg Temp")) return "Avg Temperature";
@@ -628,7 +645,6 @@
             return "Grape Varietal";
         }
 
-        // Group datasets by category. Skip any dataset flagged with hideInLegend.
         const groups = {};
         chart.data.datasets.forEach((ds, index) => {
             if (ds.hideInLegend) return;
@@ -637,10 +653,8 @@
             groups[cat].push({ds, index});
         });
 
-        // Retrieve saved legend group states from localStorage.
         let legendGroupStates = getLegendGroupStates();
 
-        // Iterate over each group.
         Object.keys(groups).forEach(category => {
             if (category === "Grape Varietal") {
                 const header = document.createElement('div');
@@ -654,7 +668,6 @@
                 groupDiv.style.display = 'flex';
                 groupDiv.style.flexDirection = 'column';
                 groupDiv.style.gap = '8px';
-                groupDiv.style.justifyContent = 'flex-start';
                 groups[category].forEach(item => {
                     const {ds, index} = item;
                     const legendItem = document.createElement('div');
@@ -664,31 +677,20 @@
                     legendItem.innerHTML = markerHTML + ds.label;
                     legendItem.style.cursor = 'pointer';
                     legendItem.onclick = function () {
-                        if (chart.data.datasets[index].pairIndices) {
-                            const indices = chart.data.datasets[index].pairIndices;
-                            let newHidden = !chart.data.datasets[indices[0]].hidden;
-                            indices.forEach(idx => {
-                                chart.data.datasets[idx].hidden = newHidden;
-                            });
-                            legendItem.style.opacity = newHidden ? 0.5 : 1;
-                        } else {
-                            chart.data.datasets[index].hidden = !chart.data.datasets[index].hidden;
-                            legendItem.style.opacity = chart.data.datasets[index].hidden ? 0.5 : 1;
-                        }
+                        chart.data.datasets[index].hidden = !chart.data.datasets[index].hidden;
+                        legendItem.style.opacity = chart.data.datasets[index].hidden ? 0.5 : 1;
                         chart.update();
                     };
                     groupDiv.appendChild(legendItem);
                 });
                 grapeVarietalContainer.appendChild(groupDiv);
             } else {
-                // For non–grape–varietal groups, create a group wrapper with a group toggle checkbox.
                 const groupWrapper = document.createElement('div');
                 groupWrapper.style.display = "inline-flex";
                 groupWrapper.style.flexDirection = "column";
                 groupWrapper.style.alignItems = "flex-start";
                 groupWrapper.style.marginRight = "15px";
 
-                // Create header container with a checkbox for group toggle
                 const headerContainer = document.createElement('div');
                 headerContainer.style.display = "flex";
                 headerContainer.style.alignItems = "center";
@@ -696,7 +698,6 @@
 
                 const groupCheckbox = document.createElement('input');
                 groupCheckbox.type = "checkbox";
-                // Check the stored state for this group if available; default is true.
                 if (!(category in legendGroupStates)) {
                     legendGroupStates[category] = true;
                 }
@@ -715,37 +716,18 @@
                 groupDiv.style.flexDirection = "column";
                 groupDiv.style.gap = "8px";
 
-                // Array to store each legend item and its dataset index for this group.
                 const groupLegendItems = [];
                 groups[category].forEach(item => {
                     const {ds, index} = item;
                     const legendItem = document.createElement('div');
                     legendItem.className = 'legend-item';
                     legendItem.style.opacity = chart.data.datasets[index].hidden ? 0.5 : 1;
-                    let markerHTML = "";
-                    if (category === "Min/Max Temp" || category === "Avg Temperature") {
-                        markerHTML = `<span style="display:inline-block; width:20px; border-bottom:2px solid ${ds.borderColor}; margin-right:5px;"></span>`;
-                    } else if (category === "Cumulative GDD") {
-                        markerHTML = `<span style="display:inline-block; width:20px; border-bottom:2px dashed ${ds.borderColor}; margin-right:5px;"></span>`;
-                    } else if (category === "Daily Rain Totals") {
-                        markerHTML = `<span style="display:inline-block; width:12px; height:12px; background-color:${ds.backgroundColor}; margin-right:5px;"></span>`;
-                    } else if (category === "Sunspot Daily Total") {
-                        markerHTML = `<span style="display:inline-block; width:12px; height:12px; background-color:purple; border-radius:50%; margin-right:5px;"></span>`;
-                    }
+                    let markerHTML = `<span style="display:inline-block; width:12px; height:12px; background-color:${ds.borderColor}; margin-right:5px;"></span>`;
                     legendItem.innerHTML = markerHTML + ds.label;
                     legendItem.style.cursor = 'pointer';
                     legendItem.onclick = function () {
-                        if (chart.data.datasets[index].pairIndices) {
-                            const indices = chart.data.datasets[index].pairIndices;
-                            let newHidden = !chart.data.datasets[indices[0]].hidden;
-                            indices.forEach(idx => {
-                                chart.data.datasets[idx].hidden = newHidden;
-                            });
-                            legendItem.style.opacity = newHidden ? 0.5 : 1;
-                        } else {
-                            chart.data.datasets[index].hidden = !chart.data.datasets[index].hidden;
-                            legendItem.style.opacity = chart.data.datasets[index].hidden ? 0.5 : 1;
-                        }
+                        chart.data.datasets[index].hidden = !chart.data.datasets[index].hidden;
+                        legendItem.style.opacity = chart.data.datasets[index].hidden ? 0.5 : 1;
                         chart.update();
                     };
                     groupDiv.appendChild(legendItem);
@@ -754,48 +736,32 @@
                 groupWrapper.appendChild(groupDiv);
                 legendContainer.appendChild(groupWrapper);
 
-                // Add event listener to groupCheckbox to toggle all items in this group.
                 groupCheckbox.addEventListener('change', function () {
-                    let newHidden = !groupCheckbox.checked; // if checked then visible (false), if unchecked then hidden (true)
+                    let newHidden = !groupCheckbox.checked;
                     groupLegendItems.forEach(item => {
                         let idx = item.index;
-                        if (chart.data.datasets[idx].pairIndices) {
-                            const indices = chart.data.datasets[idx].pairIndices;
-                            indices.forEach(i => {
-                                chart.data.datasets[i].hidden = newHidden;
-                            });
-                        } else {
-                            chart.data.datasets[idx].hidden = newHidden;
-                        }
+                        chart.data.datasets[idx].hidden = newHidden;
                         item.legendItem.style.opacity = newHidden ? 0.5 : 1;
                     });
-                    // Save the group state in localStorage.
                     let legendGroupStates = getLegendGroupStates();
                     legendGroupStates[category] = groupCheckbox.checked;
                     saveLegendGroupStates(legendGroupStates);
                     chart.update();
                 });
 
-                // If the saved state for this group is unchecked, immediately hide the group datasets.
                 if (!groupCheckbox.checked) {
                     groupLegendItems.forEach(item => {
                         let idx = item.index;
-                        if (chart.data.datasets[idx].pairIndices) {
-                            const indices = chart.data.datasets[idx].pairIndices;
-                            indices.forEach(i => {
-                                chart.data.datasets[i].hidden = true;
-                            });
-                        } else {
-                            chart.data.datasets[idx].hidden = true;
-                        }
+                        chart.data.datasets[idx].hidden = true;
                         item.legendItem.style.opacity = 0.5;
                     });
                 }
             }
         });
+        saveLegendGroupStates(legendGroupStates);
     }
 
-    // --- Load and Plot Data Automatically (Overlay Years) ---
+    // --- Load and Plot Data Automatically ---
     function loadAndPlotData() {
         if (!db) return;
         const yearCheckboxes = document.querySelectorAll("input[name='year']:checked");
@@ -827,7 +793,6 @@
             const bandFillColor = rawTempColor.replace("rgb(", "rgba(").replace(")", ",0.3)");
             const colorAvg = darkenColor(rawTempColor, 0.5);
 
-            // Temperature band: combine min and max into one legend item.
             let indexMin = datasets.length;
             datasets.push({
                 label: `Min Temp (°F) - ${year}`,
@@ -860,8 +825,6 @@
                 pairIndices: [indexMin, indexMax],
                 spanGaps: false
             });
-
-            // Avg Temp dataset.
             datasets.push({
                 label: `Avg Temp (°F) - ${year}`,
                 data: avgTempData,
@@ -876,8 +839,6 @@
                 order: 3,
                 spanGaps: false
             });
-
-            // Cumulative GDD dataset.
             datasets.push({
                 label: "Cumulative GDD - " + year,
                 data: gddData,
@@ -892,8 +853,6 @@
                 order: 4,
                 spanGaps: false
             });
-
-            // Daily Rain dataset.
             datasets.push({
                 label: "Daily Rain Total (in) - " + year,
                 data: rainData,
@@ -926,6 +885,30 @@
         const budBreakDatasets = computeBudBreakPoints(selectedYears, commonLabels, yearlyData);
         datasets = datasets.concat(budBreakDatasets);
 
+        // --- NEW: Build Vertical Lines Configuration for Predicted Bud Break ---
+        let verticalLines = [];
+        const currentYear = String(new Date().getFullYear());
+        if (selectedYears.includes(currentYear)) {
+            const res = db.exec("SELECT variety, projected_bud_break FROM grapevine_gdd");
+            if (res.length > 0) {
+                res[0].values.forEach(row => {
+                    const variety = row[0];
+                    const predicted = row[1];
+                    if (predicted && predicted.startsWith(currentYear)) {
+                        // Extract "MM-DD" from "YYYY-MM-DD"
+                        const xLabel = predicted.substring(5);
+                        verticalLines.push({
+                            xLabel: xLabel,
+                            color: getColorForVariety(variety),
+                            label: variety + " Bud Break",
+                            lineWidth: 2,
+                            font: "12px Arial"
+                        });
+                    }
+                });
+            }
+        }
+
         if (dailyChart) dailyChart.destroy();
 
         const ctx = document.getElementById('dailyChart').getContext('2d');
@@ -946,7 +929,10 @@
                     legend: {
                         display: false
                     },
-                    // --- Interactive Zoom & Pan Options ---
+                    // --- NEW: Add verticalLinePlugin configuration ---
+                    verticalLinePlugin: {
+                        lines: verticalLines
+                    },
                     zoom: {
                         zoom: {
                             wheel: {
@@ -1001,6 +987,44 @@
 
         generateCustomLegend(dailyChart);
     }
+
+    // --- NEW: Add tooltip on hover for vertical lines ---
+    const tooltipEl = document.getElementById("vlineTooltip");
+    document.getElementById("dailyChart").addEventListener("mousemove", function(event) {
+        if (!dailyChart) return;
+        const canvasPosition = this.getBoundingClientRect();
+        const xPos = event.clientX - canvasPosition.left;
+        const xScale = dailyChart.scales.x;
+        const tolerance = 5; // pixels
+        let found = false;
+        if (dailyChart.options.plugins.verticalLinePlugin && dailyChart.options.plugins.verticalLinePlugin.lines) {
+            dailyChart.options.plugins.verticalLinePlugin.lines.forEach(line => {
+                const lineX = xScale.getPixelForValue(line.xLabel);
+                if (Math.abs(xPos - lineX) <= tolerance) {
+                    tooltipEl.style.display = "block";
+                    tooltipEl.textContent = line.label;
+                    tooltipEl.style.left = (lineX + canvasPosition.left + 10) + "px";
+                    tooltipEl.style.top = (event.clientY + 10) + "px";
+                    found = true;
+                }
+            });
+        }
+        if (!found) {
+            tooltipEl.style.display = "none";
+        }
+    });
+
+    // --- NEW: Export Chart to PNG functionality ---
+    document.getElementById("exportButton").addEventListener("click", function () {
+        if (!dailyChart) {
+            alert("Chart is not loaded yet.");
+            return;
+        }
+        const link = document.createElement("a");
+        link.href = dailyChart.toBase64Image();
+        link.download = "chart.png";
+        link.click();
+    });
 
     // --- Slide-Out Panel Toggle Logic ---
     document.getElementById("toggleLeftPanel").addEventListener("click", function () {

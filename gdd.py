@@ -8,14 +8,17 @@ import requests
 import csv
 from datetime import datetime, timedelta, timezone
 
+
 # --- Helper Functions for Logging ---
 def log(message):
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
     print(f"[{now}] {message}")
 
+
 def log_debug(message):
     if DEBUG:
         log("[DEBUG] " + message)
+
 
 # === Function to Reload Configuration from config.ini ===
 def reload_config():
@@ -52,6 +55,7 @@ def reload_config():
     # Open-Meteo configuration (for fallback)
     OPENMETEO_LAT = config.getfloat('openmeteo', 'latitude')
     OPENMETEO_LON = config.getfloat('openmeteo', 'longitude')
+
 
 # === Initial Config Load ===
 reload_config()
@@ -167,7 +171,8 @@ if head_response.status_code == 200:
     if remote_last_modified_str:
         try:
             # Use timezone-aware datetime
-            remote_last_modified = datetime.strptime(remote_last_modified_str, "%a, %d %b %Y %H:%M:%S GMT").replace(tzinfo=timezone.utc)
+            remote_last_modified = datetime.strptime(remote_last_modified_str, "%a, %d %b %Y %H:%M:%S GMT").replace(
+                tzinfo=timezone.utc)
         except Exception as ex:
             log(f"Error parsing remote Last-Modified header: {ex}")
 
@@ -243,8 +248,8 @@ for row in reader:
     """, (year, month, day, fraction, daily_total, std_dev, num_obs, definitive, date_str))
 conn.commit()
 
-# Log a message once after processing is complete.
 log("Sunspot CSV processed from local file.")
+
 
 # === Function: Recalculate Cumulative, Hourly, and Daily GDD ===
 def recalcGDD(full=False):
@@ -313,7 +318,6 @@ def recalcGDD(full=False):
             cumulative_gdd += inc
             cursor.execute("UPDATE readings SET gdd = ? WHERE dateutc = ?", (cumulative_gdd, dateutc))
     conn.commit()
-
     if full:
         log("Full GDD recalculation complete.")
     else:
@@ -400,6 +404,7 @@ def fetch_day_data(mac_address, end_date):
 
         return response.json()
 
+
 # === Fetch Data from Open-Meteo API as Fallback ===
 def fetch_openmeteo_data(day_str):
     """
@@ -454,9 +459,65 @@ def fetch_openmeteo_data(day_str):
         log("No Open-Meteo data received.")
         return None
 
+
+# === Fetch Data from Open-Meteo API for Forecast (NEW) ===
+def fetch_openmeteo_forecast():
+    """
+    Fetch a 14-day hourly forecast from Open-Meteo.
+    Returns a pandas DataFrame with columns:
+      - date (Timestamp)
+      - temperature_2m (in Fahrenheit, as requested)
+    """
+    try:
+        import openmeteo_requests
+        import requests_cache
+        from retry_requests import retry
+        import pandas as pd
+    except ImportError:
+        log("Open-Meteo packages not installed. Please install openmeteo_requests, requests_cache, and retry_requests.")
+        return None
+
+    cache_session = requests_cache.CachedSession('.cache', expire_after=3600)
+    retry_session = retry(cache_session, retries=5, backoff_factor=0.2)
+    openmeteo = openmeteo_requests.Client(session=retry_session)
+
+    url = "https://api.open-meteo.com/v1/forecast"
+    params = {
+        "latitude": OPENMETEO_LAT,
+        "longitude": OPENMETEO_LON,
+        "hourly": "temperature_2m",
+        "temperature_unit": "fahrenheit",
+        "wind_speed_unit": "mph",
+        "precipitation_unit": "inch",
+        "timezone": "America/Chicago",
+        "models": "ecmwf_aifs025",
+        "forecast_days": 15
+    }
+    log(f"Fetching hourly forecast data from Open-Meteo with params: {params}")
+    responses = openmeteo.weather_api(url, params=params)
+    if responses:
+        response = responses[0]
+        hourly = response.Hourly()
+        hourly_temperature_2m = hourly.Variables(0).ValuesAsNumpy()
+        import pandas as pd
+        date_range = pd.date_range(
+            start=pd.to_datetime(hourly.Time(), unit="s", utc=True),
+            end=pd.to_datetime(hourly.TimeEnd(), unit="s", utc=True),
+            freq=pd.Timedelta(seconds=hourly.Interval()),
+            inclusive="left"
+        )
+        df = pd.DataFrame({"date": date_range, "temperature_2m": hourly_temperature_2m})
+        log("Hourly forecast data successfully retrieved from Open-Meteo.")
+        return df
+    else:
+        log("No forecast data received from Open-Meteo.")
+        return None
+
+
 # === Base Temperatures for GDD Calculations ===
 base_temp_C = 10  # For 5-minute cumulative GDD (°C)
 base_temp_F = 50  # For hourly/daily calculations (°F)
+
 
 # === Gap Filling via Interpolation Function ===
 def fill_missing_data_by_gap(day_str):
@@ -545,10 +606,46 @@ def fill_missing_data_by_gap(day_str):
             """
             cursor.execute(sql, (new_ts, new_date_str, round(interp_temp, 1)))
             log(f"Interpolated (end) reading for {new_date_str}: tempf {round(interp_temp, 1)}")
-
     conn.commit()
 
-# === Main Loop ===
+
+##############################
+# FORECAST INTEGRATION SECTION
+##############################
+# New function to append forecast data to the readings table.
+def append_forecast_data():
+    # Delete all rows with date (YYYY-MM-DD) >= today's date.
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    cursor.execute("DELETE FROM readings WHERE substr(date, 1, 10) >= ?", (today_str,))
+    conn.commit()
+    log(f"Deleted existing forecast data from readings table (rows with date >= {today_str}).")
+
+    forecast_df = fetch_openmeteo_forecast()
+    if forecast_df is not None and not forecast_df.empty:
+        import pandas as pd
+        for idx, row in forecast_df.iterrows():
+            dt_forecast = row["date"]
+            ts = int(dt_forecast.timestamp())
+            forecast_date_str = dt_forecast.isoformat() + "Z"
+            tempf = row["temperature_2m"]
+            sql = """
+                INSERT OR REPLACE INTO readings
+                (dateutc, date, tempf, gdd, gdd_hourly, gdd_daily, is_generated, mac_source)
+                VALUES (?, ?, ?, 0, 0, 0, 1, ?)
+            """
+            try:
+                cursor.execute(sql, (ts, forecast_date_str, tempf, "OPENMETEO"))
+            except Exception as ex:
+                log(f"Error inserting forecast reading for {forecast_date_str}: {ex}")
+        conn.commit()
+        log(f"Inserted forecast data for {len(forecast_df)} hours into readings.")
+    else:
+        log("Forecast data unavailable from Open-Meteo.")
+
+
+##############################
+# Main Historical Data Ingestion Loop
+##############################
 lastRecalcRowCount = 0
 new_total = 0
 day = START_DATE.date()
@@ -648,7 +745,8 @@ while day < CURRENT_DATE:
                         VALUES ({', '.join(['?'] * len(fields_order))}, ?, ?, ?, ?, ?)
                     """
                     try:
-                        insert_tuple = tuple(backup_values.get(k, None) for k in fields_order) + (0, 0, 0, 0, BACKUP_MAC_ADDRESS)
+                        insert_tuple = tuple(backup_values.get(k, None) for k in fields_order) + (
+                        0, 0, 0, 0, BACKUP_MAC_ADDRESS)
                         cursor.execute(sql, insert_tuple)
                         log(f"Inserted backup reading for {raw_date} from backup station.")
                     except Exception as ex:
@@ -677,6 +775,7 @@ while day < CURRENT_DATE:
         df_obj = fetch_openmeteo_data(day_str)
         if df_obj is not None:
             import pandas as pd
+
             df = df_obj  # fetch_openmeteo_data returns a pandas DataFrame
             if not df.empty:
                 for idx, row in df.iterrows():
@@ -703,7 +802,8 @@ while day < CURRENT_DATE:
                     except Exception as ex:
                         log(f"Error inserting Open-Meteo reading for {date_str}: {ex}")
                 conn.commit()
-                cursor.execute("SELECT COUNT(*) FROM readings WHERE substr(date,1,10)=? AND tempf IS NOT NULL", (day_str,))
+                cursor.execute("SELECT COUNT(*) FROM readings WHERE substr(date,1,10)=? AND tempf IS NOT NULL",
+                               (day_str,))
                 valid_count = cursor.fetchone()[0]
                 log(f"After Open-Meteo fallback, valid readings for {day_str}: {valid_count}")
             else:
@@ -731,6 +831,11 @@ while day < CURRENT_DATE:
         lastRecalcRowCount = totalRowCount
 
     day = day + timedelta(days=1)
+
+##############################
+# Append Forecast Data
+##############################
+append_forecast_data()
 
 # --- Final Recalculation of GDD ---
 log("Clearing all GDD values before full recalculation...")

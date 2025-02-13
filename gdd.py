@@ -3,7 +3,6 @@ import os
 import sqlite3
 import time
 from io import StringIO
-
 import requests
 import csv
 from datetime import datetime, timedelta, timezone
@@ -24,7 +23,7 @@ def log_debug(message):
 def reload_config():
     global DB_FILENAME, RETRY_SLEEP_TIME, RATE_LIMIT_DELAY, API_CALL_DELAY, DEBUG, RECALC_INTERVAL
     global MAC_ADDRESS, API_KEY, APPLICATION_KEY, BACKUP_MAC_ADDRESS, URL_TEMPLATE, START_DATE, CURRENT_DATE
-    global OPENMETEO_LAT, OPENMETEO_LON
+    global OPENMETEO_LAT, OPENMETEO_LON, BUD_BREAK_START
 
     config = configparser.ConfigParser()
     config.read('config.ini')
@@ -35,7 +34,7 @@ def reload_config():
     RATE_LIMIT_DELAY = config.getfloat('global', 'rate_limit_delay')
     API_CALL_DELAY = config.getfloat('global', 'api_call_delay', fallback=1.0)
     DEBUG = config.getboolean('global', 'debug')
-    RECALC_INTERVAL = config.getint('global', 'recalc_interval', fallback=100)
+    RECALC_INTERVAL = config.getint('global', 'recalc_interval', fallback=300)
 
     # Primary weather station configuration
     MAC_ADDRESS = config.get('primary', 'mac_address')
@@ -51,6 +50,11 @@ def reload_config():
     # Date configuration
     START_DATE = datetime.strptime(config.get('date', 'start_date'), "%Y-%m-%d")
     CURRENT_DATE = datetime.now(timezone.utc).date()
+    # --- Read bud_break_start from config or default to January 1 of the current year ---
+    try:
+        BUD_BREAK_START = datetime.strptime(config.get('date', 'bud_break_start'), "%Y-%m-%d").date()
+    except Exception:
+        BUD_BREAK_START = datetime(datetime.now(timezone.utc).year, 1, 1).date()
 
     # Open-Meteo configuration (for fallback)
     OPENMETEO_LAT = config.getfloat('openmeteo', 'latitude')
@@ -163,16 +167,13 @@ conn.commit()
 sunspot_url = "https://www.sidc.be/SILSO/INFO/sndtotcsv.php?"
 local_file = "SN_d_tot_V2.0.csv"
 
-# First, perform a HEAD request to get the remote file's Last-Modified header.
 head_response = requests.head(sunspot_url)
 remote_last_modified = None
 if head_response.status_code == 200:
     remote_last_modified_str = head_response.headers.get("Last-Modified")
     if remote_last_modified_str:
         try:
-            # Use timezone-aware datetime
-            remote_last_modified = datetime.strptime(remote_last_modified_str, "%a, %d %b %Y %H:%M:%S GMT").replace(
-                tzinfo=timezone.utc)
+            remote_last_modified = datetime.strptime(remote_last_modified_str, "%a, %d %b %Y %H:%M:%S GMT").replace(tzinfo=timezone.utc)
         except Exception as ex:
             log(f"Error parsing remote Last-Modified header: {ex}")
 
@@ -187,14 +188,12 @@ if remote_last_modified and os.path.exists(local_file):
 if download_file:
     response = requests.get(sunspot_url)
     if response.status_code == 200:
-        # Write the updated CSV to the local file.
         with open(local_file, "w", newline="") as f:
             f.write(response.text)
         log("Sunspot data updated from SIDC.")
     else:
         log(f"Failed to fetch sunspot data. HTTP Status Code: {response.status_code}")
 
-# Now load and process the CSV data from the local file.
 with open(local_file, "r", newline="") as f:
     csv_data = f.read()
 
@@ -203,14 +202,12 @@ reader = csv.reader(csvfile, delimiter=";")
 header = next(reader)  # Skip header row
 
 for row in reader:
-    # Ensure there are at least 8 columns.
     if len(row) < 8:
         continue
     try:
         year = int(row[0])
     except Exception:
         continue
-    # Only import data from 2010 onward.
     if year < 2010:
         continue
     try:
@@ -255,9 +252,8 @@ log("Sunspot CSV processed from local file.")
 def recalcGDD(full=False):
     """
     Recalculates cumulative GDD values.
-
     Modes:
-      - Incremental (full=False, default): For each year, only update rows after the last calculated value.
+      - Incremental (full=False): For each year, only update rows after the last calculated value.
       - Full (full=True): For each year, start at the beginning and recalculate GDD for all rows.
     """
     if full:
@@ -265,43 +261,25 @@ def recalcGDD(full=False):
     else:
         log("Performing incremental GDD recalculation...")
 
-    # Get all distinct years present in the readings table.
     cursor.execute("SELECT DISTINCT substr(date, 1, 4) as year FROM readings ORDER BY year ASC")
     years = [row[0] for row in cursor.fetchall()]
-
     for year in years:
         if full:
             cumulative_gdd = 0
             log(f"For year {year}, starting full recalculation from beginning with cumulative GDD {cumulative_gdd:.3f}.")
-            # Process every row for the year from the start.
-            cursor.execute(
-                "SELECT dateutc, tempf, date FROM readings WHERE substr(date, 1, 4)=? ORDER BY dateutc ASC",
-                (year,)
-            )
+            cursor.execute("SELECT dateutc, tempf, date FROM readings WHERE substr(date, 1, 4)=? ORDER BY dateutc ASC", (year,))
         else:
-            # Try to get the last calculated cumulative GDD for this year.
-            cursor.execute(
-                "SELECT MAX(dateutc), gdd FROM readings WHERE substr(date, 1, 4)=? AND gdd>0",
-                (year,)
-            )
+            cursor.execute("SELECT MAX(dateutc), gdd FROM readings WHERE substr(date, 1, 4)=? AND gdd>0", (year,))
             result = cursor.fetchone()
             if result[0] is not None:
                 last_dateutc = result[0]
                 cumulative_gdd = result[1]
                 log(f"For year {year}, starting incremental recalculation from dateutc {last_dateutc} with cumulative GDD {cumulative_gdd:.3f}.")
-                # Process only rows after the last recalculated timestamp.
-                cursor.execute(
-                    "SELECT dateutc, tempf, date FROM readings WHERE substr(date, 1, 4)=? AND dateutc > ? ORDER BY dateutc ASC",
-                    (year, last_dateutc)
-                )
+                cursor.execute("SELECT dateutc, tempf, date FROM readings WHERE substr(date, 1, 4)=? AND dateutc > ? ORDER BY dateutc ASC", (year, last_dateutc))
             else:
                 cumulative_gdd = 0
                 log(f"For year {year}, no previous GDD found. Recalculating from start.")
-                cursor.execute(
-                    "SELECT dateutc, tempf, date FROM readings WHERE substr(date, 1, 4)=? ORDER BY dateutc ASC",
-                    (year,)
-                )
-
+                cursor.execute("SELECT dateutc, tempf, date FROM readings WHERE substr(date, 1, 4)=? ORDER BY dateutc ASC", (year,))
         rows = cursor.fetchall()
         for dateutc, tempf, date_str in rows:
             if tempf is None:
@@ -311,9 +289,7 @@ def recalcGDD(full=False):
             except Exception as e:
                 log(f"Skipping record {dateutc} due to invalid tempf: {tempf}")
                 continue
-            # Convert temperature from Fahrenheit to Celsius.
             temp_c = (val - 32) * 5 / 9
-            # Calculate the increment (based on a 5-minute period: 288 intervals per day)
             inc = max(0, (temp_c - base_temp_C)) / 288
             cumulative_gdd += inc
             cursor.execute("UPDATE readings SET gdd = ? WHERE dateutc = ?", (cumulative_gdd, dateutc))
@@ -329,10 +305,7 @@ def fetch_day_data(mac_address, end_date):
     """
     Fetch data for a given day using Ambient Weather’s API.
     Sleeps for API_CALL_DELAY seconds before each call.
-
-    If a 404 (Not Found) is returned, or a 401/403 is returned, the function returns None.
-    For 503 errors with a Retry-After > 30 sec, returns None.
-    Otherwise, returns the JSON response.
+    Returns the JSON response or None on errors.
     """
     url = URL_TEMPLATE.format(
         mac_address=mac_address,
@@ -351,7 +324,6 @@ def fetch_day_data(mac_address, end_date):
             time.sleep(RETRY_SLEEP_TIME)
             continue
 
-        # Handle 404 Not Found
         if response.status_code == 404:
             log(f"HTTP error 404 for URL {url}: Not Found. No data available.")
             return None
@@ -420,7 +392,6 @@ def fetch_openmeteo_data(day_str):
         log("Open-Meteo packages not installed. Please install openmeteo_requests, requests_cache, and retry_requests.")
         return None
 
-    # Set the start_date and end_date for the day
     start_date = day_str
     dt = datetime.strptime(day_str, "%Y-%m-%d")
     end_date = (dt + timedelta(days=1)).strftime("%Y-%m-%d")
@@ -526,16 +497,12 @@ def fill_missing_data_by_gap(day_str):
     If the gap between two rows exceeds 300 seconds, linearly interpolate missing intervals.
     Interpolated tempf values are rounded to one decimal.
     Inserted rows get is_generated = 1 and mac_source = "INTERP".
-    Additionally, fill gaps from the beginning of the day (00:00) to the first reading
-    and from the last reading to the expected last reading time (23:55).
+    Also fills gaps at the beginning (from 00:00) and at the end (to 23:55).
     """
-    # Calculate expected start and end timestamps for the day.
     dt_day = datetime.strptime(day_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     expected_start = int(dt_day.timestamp())
-    # Expected last reading is at 23:55 (287 intervals of 300 sec after 00:00)
     expected_end = expected_start + (287 * 300)
 
-    # Get all existing rows for the day.
     cursor.execute(
         "SELECT dateutc, tempf FROM readings WHERE substr(date, 1, 10)=? ORDER BY dateutc ASC",
         (day_str,)
@@ -545,14 +512,12 @@ def fill_missing_data_by_gap(day_str):
         log(f"No readings found for {day_str} to interpolate.")
         return
 
-    # If the first reading is after expected_start, fill the gap at the beginning.
     first_ts, first_temp = rows[0]
     if first_ts > expected_start:
         gap = first_ts - expected_start
-        missing_intervals = gap // 300  # number of intervals missing before first reading
+        missing_intervals = gap // 300
         for j in range(1, missing_intervals + 1):
             new_ts = expected_start + j * 300
-            # Use first_temp for extrapolation.
             interp_temp = first_temp
             dt_new = datetime.fromtimestamp(new_ts, tz=timezone.utc)
             new_date_str = dt_new.isoformat() + "Z"
@@ -564,7 +529,6 @@ def fill_missing_data_by_gap(day_str):
             cursor.execute(sql, (new_ts, new_date_str, round(interp_temp, 1)))
             log(f"Interpolated (start) reading for {new_date_str}: tempf {round(interp_temp, 1)}")
 
-    # Interpolate between existing rows.
     for i in range(len(rows) - 1):
         t1, temp1 = rows[i]
         t2, temp2 = rows[i + 1]
@@ -588,14 +552,12 @@ def fill_missing_data_by_gap(day_str):
                 cursor.execute(sql, (new_ts, new_date_str, interp_temp))
                 log(f"Interpolated reading for {new_date_str}: tempf {interp_temp:.1f}")
 
-    # If the last reading is before expected_end, fill the gap at the end.
     last_ts, last_temp = rows[-1]
     if last_ts < expected_end:
         gap = expected_end - last_ts
-        missing_intervals = gap // 300  # number of intervals missing after last reading
+        missing_intervals = gap // 300
         for j in range(1, missing_intervals + 1):
             new_ts = last_ts + j * 300
-            # Use last_temp for extrapolation.
             interp_temp = last_temp
             dt_new = datetime.fromtimestamp(new_ts, tz=timezone.utc)
             new_date_str = dt_new.isoformat() + "Z"
@@ -612,9 +574,7 @@ def fill_missing_data_by_gap(day_str):
 ##############################
 # FORECAST INTEGRATION SECTION
 ##############################
-# New function to append forecast data to the readings table.
 def append_forecast_data():
-    # Delete all rows with date (YYYY-MM-DD) >= today's date.
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     cursor.execute("DELETE FROM readings WHERE substr(date, 1, 10) >= ?", (today_str,))
     conn.commit()
@@ -643,6 +603,67 @@ def append_forecast_data():
         log("Forecast data unavailable from Open-Meteo.")
 
 
+# --- NEW: Project Bud Break Using Historical Regression ---
+def project_bud_break_regression():
+    """
+    For each grape variety in grapevine_gdd, use historical bud break dates to derive a trend.
+    For each year from 2012 until the previous year, find the first date when cumulative GDD (from January 1)
+    reaches the heat_summation threshold for that variety. Convert that date to day-of-year (DOY),
+    perform a linear regression (DOY vs. year), and use the trend to predict the current year's bud break.
+    Update grapevine_gdd with the predicted bud break date.
+    """
+    # Add the new column if it doesn't exist.
+    try:
+        cursor.execute("ALTER TABLE grapevine_gdd ADD COLUMN projected_bud_break TEXT")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+
+    current_year = datetime.now(timezone.utc).year
+    historical_years = list(range(2012, current_year))  # use past years
+    cursor.execute("SELECT variety, heat_summation FROM grapevine_gdd")
+    varieties = cursor.fetchall()
+
+    for variety, heat_sum in varieties:
+        if heat_sum is None:
+            log(f"Skipping {variety} due to undefined heat_summation.")
+            continue
+        data_points = []  # list of (year, bud_break_doy)
+        for yr in historical_years:
+            cursor.execute(
+                "SELECT date FROM readings WHERE substr(date, 1, 4)=? AND gdd >= ? ORDER BY date ASC LIMIT 1",
+                (str(yr), heat_sum)
+            )
+            row = cursor.fetchone()
+            if row:
+                try:
+                    dt = datetime.fromisoformat(row[0].rstrip("Z"))
+                    bud_break_doy = dt.timetuple().tm_yday
+                    data_points.append((yr, bud_break_doy))
+                except Exception as ex:
+                    log(f"Error parsing date {row[0]} for {variety} in year {yr}: {ex}")
+        if len(data_points) < 2:
+            log(f"Not enough historical data for {variety} to perform regression; skipping.")
+            continue
+        # Simple linear regression: slope = cov(x, y)/var(x), intercept = mean(y) - slope * mean(x)
+        mean_year = sum(x for x, _ in data_points) / len(data_points)
+        mean_doy = sum(y for _, y in data_points) / len(data_points)
+        numerator = sum((x - mean_year) * (y - mean_doy) for x, y in data_points)
+        denominator = sum((x - mean_year) ** 2 for x, y in data_points)
+        slope = numerator / denominator if denominator != 0 else 0
+        intercept = mean_doy - slope * mean_year
+        predicted_doy = slope * current_year + intercept
+        predicted_doy = max(1, min(366, predicted_doy))
+        predicted_date = (datetime(current_year, 1, 1) + timedelta(days=predicted_doy - 1)).date()
+        cursor.execute("""
+            UPDATE grapevine_gdd
+            SET projected_bud_break = ?
+            WHERE variety = ?
+        """, (predicted_date.isoformat(), variety))
+        log(f"Predicted bud break for {variety} using regression: {predicted_date.isoformat()} (slope: {slope:.2f}, intercept: {intercept:.2f})")
+    conn.commit()
+
+
 ##############################
 # Main Historical Data Ingestion Loop
 ##############################
@@ -651,10 +672,7 @@ new_total = 0
 day = START_DATE.date()
 
 while day < CURRENT_DATE:
-    # Reload config at the beginning of each day to pick up any changes.
     reload_config()
-    # (Optionally, CURRENT_DATE can also be updated here.)
-
     day_str = day.strftime("%Y-%m-%d")
     cursor.execute("SELECT COUNT(*) FROM readings WHERE substr(date,1,10)=?", (day_str,))
     old_count = cursor.fetchone()[0]
@@ -712,7 +730,7 @@ while day < CURRENT_DATE:
             new_total += inserted_count
             log(f"Inserted {inserted_count} new primary readings for {day_str} (total now: {new_count}).")
 
-    # --- Backup Data Insertion (if valid_count is less than 287) ---
+    # --- Backup Data Insertion ---
     cursor.execute("SELECT COUNT(*) FROM readings WHERE substr(date,1,10)=? AND tempf IS NOT NULL", (day_str,))
     valid_count = cursor.fetchone()[0]
     if valid_count < 287:
@@ -745,8 +763,7 @@ while day < CURRENT_DATE:
                         VALUES ({', '.join(['?'] * len(fields_order))}, ?, ?, ?, ?, ?)
                     """
                     try:
-                        insert_tuple = tuple(backup_values.get(k, None) for k in fields_order) + (
-                        0, 0, 0, 0, BACKUP_MAC_ADDRESS)
+                        insert_tuple = tuple(backup_values.get(k, None) for k in fields_order) + (0, 0, 0, 0, BACKUP_MAC_ADDRESS)
                         cursor.execute(sql, insert_tuple)
                         log(f"Inserted backup reading for {raw_date} from backup station.")
                     except Exception as ex:
@@ -769,17 +786,15 @@ while day < CURRENT_DATE:
         else:
             log(f"No backup data received for {day_str}.")
 
-    # --- Open-Meteo Fallback (if still fewer than 287 valid readings) ---
+    # --- Open-Meteo Fallback ---
     if valid_count < 287:
         log(f"{day_str}: Only {valid_count} valid readings after backup. Attempting to use Open-Meteo data.")
         df_obj = fetch_openmeteo_data(day_str)
         if df_obj is not None:
             import pandas as pd
-
-            df = df_obj  # fetch_openmeteo_data returns a pandas DataFrame
+            df = df_obj
             if not df.empty:
                 for idx, row in df.iterrows():
-
                     if pd.isnull(row['tempf']):
                         log(f"Skipping row {idx} due to missing tempf value.")
                         continue
@@ -788,22 +803,19 @@ while day < CURRENT_DATE:
                     except Exception as ex:
                         log(f"Error rounding tempf value for row {idx}: {ex}")
                         continue
-
                     ts = int(row['date'].timestamp())
                     date_str = row['date'].isoformat() + "Z"
-                    tempf = round(row['tempf'], 1)
                     sql = """
                         INSERT OR IGNORE INTO readings
                         (dateutc, date, tempf, gdd, gdd_hourly, gdd_daily, is_generated, mac_source)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, 0, 0, 0, ?, ?)
                     """
                     try:
-                        cursor.execute(sql, (ts, date_str, tempf, 0, 0, 0, 1, "OPENMETEO"))
+                        cursor.execute(sql, (ts, date_str, tempf, 1, "OPENMETEO"))
                     except Exception as ex:
                         log(f"Error inserting Open-Meteo reading for {date_str}: {ex}")
                 conn.commit()
-                cursor.execute("SELECT COUNT(*) FROM readings WHERE substr(date,1,10)=? AND tempf IS NOT NULL",
-                               (day_str,))
+                cursor.execute("SELECT COUNT(*) FROM readings WHERE substr(date,1,10)=? AND tempf IS NOT NULL", (day_str,))
                 valid_count = cursor.fetchone()[0]
                 log(f"After Open-Meteo fallback, valid readings for {day_str}: {valid_count}")
             else:
@@ -818,12 +830,10 @@ while day < CURRENT_DATE:
     else:
         log(f"{day_str}: All intervals have valid temperature data.")
 
-    # --- After interpolation, check the final number of rows for the day ---
     cursor.execute("SELECT COUNT(*) FROM readings WHERE substr(date, 1, 10)=?", (day_str,))
     final_day_count = cursor.fetchone()[0]
     log(f"After interpolation, {day_str} has {final_day_count} readings.")
 
-    # --- Periodic Recalculation of GDD ---
     cursor.execute("SELECT COUNT(*) FROM readings")
     totalRowCount = cursor.fetchone()[0]
     if totalRowCount - lastRecalcRowCount >= RECALC_INTERVAL:
@@ -845,5 +855,9 @@ conn.commit()
 log("Performing final full recalculation of cumulative, hourly, and daily GDD...")
 recalcGDD(full=True)
 conn.commit()
+
+# --- NEW: Project Bud Break Using Historical Regression ---
+project_bud_break_regression()
+
 conn.close()
 log("Data retrieval complete. Added " + str(new_total) + " new primary readings in total.")

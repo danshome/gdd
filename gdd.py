@@ -1,39 +1,46 @@
 import configparser
 import os
 import sqlite3
+import sys
 import time
 from io import StringIO
 import requests
 import csv
 from datetime import datetime, timedelta, timezone
 
-
 # --- Helper Functions for Logging ---
-def log(message):
+def log(message: str) -> None:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
     print(f"[{now}] {message}")
 
-
-def log_debug(message):
+def log_debug(message: str) -> None:
     if DEBUG:
         log("[DEBUG] " + message)
 
-
 # === Function to Reload Configuration from config.ini ===
-def reload_config():
+def reload_config() -> None:
     global DB_FILENAME, RETRY_SLEEP_TIME, RATE_LIMIT_DELAY, API_CALL_DELAY, DEBUG, RECALC_INTERVAL
     global MAC_ADDRESS, API_KEY, APPLICATION_KEY, BACKUP_MAC_ADDRESS, URL_TEMPLATE, START_DATE, CURRENT_DATE
     global OPENMETEO_LAT, OPENMETEO_LON, BUD_BREAK_START
 
+    # Check if config.ini exists
+    if not os.path.exists('config.ini'):
+        log("Error: config.ini not found.")
+        sys.exit(1)
+
     config = configparser.ConfigParser()
-    config.read('config.ini')
+    try:
+        config.read('config.ini')
+    except configparser.Error as e:
+        log(f"Error reading config.ini: {e}")
+        sys.exit(1)
 
     # Global configuration
     DB_FILENAME = config.get('global', 'db_filename')
     RETRY_SLEEP_TIME = config.getfloat('global', 'retry_sleep_time')
     RATE_LIMIT_DELAY = config.getfloat('global', 'rate_limit_delay')
     API_CALL_DELAY = config.getfloat('global', 'api_call_delay', fallback=1.0)
-    DEBUG = config.getboolean('global', 'debug')
+    DEBUG = config.getboolean('global', 'debug', fallback=False)
     RECALC_INTERVAL = config.getint('global', 'recalc_interval', fallback=300)
 
     # Primary weather station configuration
@@ -48,8 +55,13 @@ def reload_config():
     URL_TEMPLATE = config.get('api', 'url_template')
 
     # Date configuration
-    START_DATE = datetime.strptime(config.get('date', 'start_date'), "%Y-%m-%d")
+    try:
+        START_DATE = datetime.strptime(config.get('date', 'start_date'), "%Y-%m-%d")
+    except ValueError:
+        log("Error: Invalid date format in config.ini for start_date.")
+        sys.exit(1)
     CURRENT_DATE = datetime.now(timezone.utc).date()
+
     # --- Read bud_break_start from config or default to January 1 of the current year ---
     try:
         BUD_BREAK_START = datetime.strptime(config.get('date', 'bud_break_start'), "%Y-%m-%d").date()
@@ -59,7 +71,6 @@ def reload_config():
     # Open-Meteo configuration (for fallback)
     OPENMETEO_LAT = config.getfloat('openmeteo', 'latitude')
     OPENMETEO_LON = config.getfloat('openmeteo', 'longitude')
-
 
 # === Initial Config Load ===
 reload_config()
@@ -123,7 +134,7 @@ cursor.execute("CREATE INDEX IF NOT EXISTS idx_readings_day ON readings (substr(
 cursor.execute("CREATE INDEX IF NOT EXISTS idx_gdd ON readings (gdd);")
 conn.commit()
 
-# === Import CSV Data into a New Table ===
+# === Import CSV Data into a New Table (grapevine_gdd) ===
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS grapevine_gdd (
     variety TEXT PRIMARY KEY,
@@ -134,8 +145,13 @@ conn.commit()
 
 with open("grapevine_gdd.csv", "r", newline='') as csvfile:
     reader = csv.reader(csvfile)
-    next(reader)  # Skip header row.
+    header = next(reader)
+    required_headers = ['variety', 'heat_summation']
+    if header != required_headers:
+        log(f"Unexpected CSV headers in grapevine_gdd.csv: {header}. Expected: {required_headers}")
     for row in reader:
+        if len(row) < 2:
+            continue
         variety, heat_summation = row
         try:
             heat_summation = int(heat_summation)
@@ -200,7 +216,6 @@ with open(local_file, "r", newline="") as f:
 csvfile = StringIO(csv_data)
 reader = csv.reader(csvfile, delimiter=";")
 header = next(reader)  # Skip header row
-
 for row in reader:
     if len(row) < 8:
         continue
@@ -247,9 +262,8 @@ conn.commit()
 
 log("Sunspot CSV processed from local file.")
 
-
 # === Function: Recalculate Cumulative, Hourly, and Daily GDD ===
-def recalcGDD(full=False):
+def recalcGDD(full: bool = False) -> None:
     """
     Recalculates cumulative GDD values.
     Modes:
@@ -299,9 +313,8 @@ def recalcGDD(full=False):
     else:
         log("Incremental GDD recalculation complete.")
 
-
 # === Fetch Data from Ambient Weather API ===
-def fetch_day_data(mac_address, end_date):
+def fetch_day_data(mac_address: str, end_date: str):
     """
     Fetch data for a given day using Ambient Weather’s API.
     Sleeps for API_CALL_DELAY seconds before each call.
@@ -376,9 +389,8 @@ def fetch_day_data(mac_address, end_date):
 
         return response.json()
 
-
 # === Fetch Data from Open-Meteo API as Fallback ===
-def fetch_openmeteo_data(day_str):
+def fetch_openmeteo_data(day_str: str):
     """
     Fetch hourly data for the given day from the Open-Meteo archive.
     Returns a pandas DataFrame with columns 'date' and 'tempf'.
@@ -429,7 +441,6 @@ def fetch_openmeteo_data(day_str):
     else:
         log("No Open-Meteo data received.")
         return None
-
 
 # === Fetch Data from Open-Meteo API for Forecast (NEW) ===
 def fetch_openmeteo_forecast():
@@ -484,14 +495,12 @@ def fetch_openmeteo_forecast():
         log("No forecast data received from Open-Meteo.")
         return None
 
-
 # === Base Temperatures for GDD Calculations ===
 base_temp_C = 10  # For 5-minute cumulative GDD (°C)
 base_temp_F = 50  # For hourly/daily calculations (°F)
 
-
 # === Gap Filling via Interpolation Function ===
-def fill_missing_data_by_gap(day_str):
+def fill_missing_data_by_gap(day_str: str) -> None:
     """
     For a given day (YYYY-MM-DD), examine consecutive readings in the database.
     If the gap between two rows exceeds 300 seconds, linearly interpolate missing intervals.
@@ -570,11 +579,10 @@ def fill_missing_data_by_gap(day_str):
             log(f"Interpolated (end) reading for {new_date_str}: tempf {round(interp_temp, 1)}")
     conn.commit()
 
-
 ##############################
 # FORECAST INTEGRATION SECTION
 ##############################
-def append_forecast_data():
+def append_forecast_data() -> None:
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     cursor.execute("DELETE FROM readings WHERE substr(date, 1, 10) >= ?", (today_str,))
     conn.commit()
@@ -602,9 +610,8 @@ def append_forecast_data():
     else:
         log("Forecast data unavailable from Open-Meteo.")
 
-
 # --- NEW: Project Bud Break Using Historical Regression ---
-def project_bud_break_regression():
+def project_bud_break_regression() -> None:
     """
     For each grape variety in grapevine_gdd, use historical bud break dates to derive a trend.
     For each year from 2012 until the previous year, find the first date when cumulative GDD (from January 1)
@@ -662,7 +669,6 @@ def project_bud_break_regression():
         """, (predicted_date.isoformat(), variety))
         log(f"Predicted bud break for {variety} using regression: {predicted_date.isoformat()} (slope: {slope:.2f}, intercept: {intercept:.2f})")
     conn.commit()
-
 
 ##############################
 # Main Historical Data Ingestion Loop

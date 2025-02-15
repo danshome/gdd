@@ -584,11 +584,10 @@ base_temp_F = 50  # For hourly/daily calculations (°F)
 # === Gap Filling via Interpolation Function ===
 def fill_missing_data_by_gap(day_str: str) -> None:
     """
-    For a given day (YYYY-MM-DD), examine consecutive readings in the database.
-    If the gap between two rows exceeds 300 seconds, linearly interpolate missing intervals.
+    For a given day (YYYY-MM-DD), this function snaps each reading’s timestamp to the expected 5-minute grid,
+    then fills in any missing intervals by linearly interpolating temperature values.
     Interpolated tempf values are rounded to one decimal.
     Inserted rows get is_generated = 1 and mac_source = "INTERP".
-    Also fills gaps at the beginning (from 00:00) and at the end (to 23:55).
     """
     try:
         dt_day = datetime.strptime(day_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
@@ -597,6 +596,7 @@ def fill_missing_data_by_gap(day_str: str) -> None:
         return
     expected_start = int(dt_day.timestamp())
     expected_end = expected_start + (287 * 300)
+    expected_points = list(range(expected_start, expected_end + 1, 300))
     try:
         cursor.execute(
             "SELECT dateutc, tempf FROM readings WHERE substr(date, 1, 10)=? ORDER BY dateutc ASC",
@@ -610,57 +610,44 @@ def fill_missing_data_by_gap(day_str: str) -> None:
         log(f"No readings found for {day_str} to interpolate.")
         return
 
-    first_ts, first_temp = rows[0]
-    if first_ts > expected_start:
-        gap = first_ts - expected_start
-        missing_intervals = gap // 300
-        for j in range(1, missing_intervals + 1):
-            new_ts = expected_start + j * 300
-            interp_temp = first_temp
-            dt_new = datetime.fromtimestamp(new_ts, tz=timezone.utc)
-            new_date_str = dt_new.isoformat() + "Z"
-            execute_sql("""
+    tolerance = 10  # seconds tolerance for snapping
+    # Build a dictionary of available data keyed by the snapped grid timestamp.
+    available = {}
+    for ts, temp in rows:
+        snapped = expected_start + ((ts - expected_start) // 300) * 300
+        # Only add the first reading found for this grid point.
+        if snapped not in available:
+            available[snapped] = temp
+
+    grid_points = sorted(available.keys())
+    # Iterate over the complete grid and insert interpolated readings where data is missing.
+    for point in expected_points:
+        if point in available:
+            continue  # already have a reading for this grid point
+        # Find the nearest available points before and after the missing point.
+        prev_points = [p for p in grid_points if p < point]
+        next_points = [p for p in grid_points if p > point]
+        if prev_points and next_points:
+            p_prev = max(prev_points)
+            p_next = min(next_points)
+            temp_prev = available[p_prev]
+            temp_next = available[p_next]
+            fraction = (point - p_prev) / (p_next - p_prev)
+            interp_temp = round(temp_prev + fraction * (temp_next - temp_prev), 1)
+        elif prev_points:
+            interp_temp = available[max(prev_points)]
+        elif next_points:
+            interp_temp = available[min(next_points)]
+        else:
+            continue  # should not occur
+        dt_new = datetime.fromtimestamp(point, tz=timezone.utc)
+        new_date_str = dt_new.isoformat() + "Z"
+        execute_sql("""
                 INSERT OR REPLACE INTO readings
                 (dateutc, date, tempf, gdd, gdd_hourly, gdd_daily, is_generated, mac_source)
                 VALUES (?, ?, ?, 0, 0, 0, 1, "INTERP")
-            """, (new_ts, new_date_str, round(interp_temp, 1)))
-            log(f"Interpolated (start) reading for {new_date_str}: tempf {round(interp_temp, 1)}")
-    for i in range(len(rows) - 1):
-        t1, temp1 = rows[i]
-        t2, temp2 = rows[i + 1]
-        if temp1 is None or temp2 is None:
-            continue
-        gap = t2 - t1
-        if gap > 300:
-            missing_intervals = gap // 300 - 1
-            for j in range(1, missing_intervals + 1):
-                new_ts = t1 + j * 300
-                fraction = j / (missing_intervals + 1)
-                interp_temp = temp1 + fraction * (temp2 - temp1)
-                interp_temp = round(interp_temp, 1)
-                dt_new = datetime.fromtimestamp(new_ts, tz=timezone.utc)
-                new_date_str = dt_new.isoformat() + "Z"
-                execute_sql("""
-                    INSERT OR REPLACE INTO readings
-                    (dateutc, date, tempf, gdd, gdd_hourly, gdd_daily, is_generated, mac_source)
-                    VALUES (?, ?, ?, 0, 0, 0, 1, "INTERP")
-                """, (new_ts, new_date_str, interp_temp))
-                log(f"Interpolated reading for {new_date_str}: tempf {interp_temp:.1f}")
-    last_ts, last_temp = rows[-1]
-    if last_ts < expected_end:
-        gap = expected_end - last_ts
-        missing_intervals = gap // 300
-        for j in range(1, missing_intervals + 1):
-            new_ts = last_ts + j * 300
-            interp_temp = last_temp
-            dt_new = datetime.fromtimestamp(new_ts, tz=timezone.utc)
-            new_date_str = dt_new.isoformat() + "Z"
-            execute_sql("""
-                INSERT OR REPLACE INTO readings
-                (dateutc, date, tempf, gdd, gdd_hourly, gdd_daily, is_generated, mac_source)
-                VALUES (?, ?, ?, 0, 0, 0, 1, "INTERP")
-            """, (new_ts, new_date_str, round(interp_temp, 1)))
-            log(f"Interpolated (end) reading for {new_date_str}: tempf {round(interp_temp, 1)}")
+        """, (point, new_date_str, interp_temp))
+        log(f"Interpolated reading for {new_date_str}: tempf {interp_temp:.1f}")
     conn.commit()
 
 ##############################
@@ -949,7 +936,7 @@ while day < CURRENT_DATE:
             log(f"No Open-Meteo data received for {day_str}.")
 
     # --- Interpolation as Last Resort ---
-    if valid_count < 287:
+    if valid_count < 288:
         log(f"{day_str}: Only {valid_count} valid readings after all fallbacks. Filling gaps via interpolation.")
         fill_missing_data_by_gap(day_str)
     else:

@@ -8,6 +8,11 @@ import requests
 import csv
 from datetime import datetime, timedelta, timezone
 
+# --- Constants for File Names ---
+CONFIG_FILE = "config.ini"
+GRAPEVINE_CSV = "grapevine_gdd.csv"
+SUNSPOT_CSV = "SN_d_tot_V2.0.csv"
+
 # --- Helper Functions for Logging ---
 def log(message: str) -> None:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
@@ -22,37 +27,61 @@ def reload_config() -> None:
     global DB_FILENAME, RETRY_SLEEP_TIME, RATE_LIMIT_DELAY, API_CALL_DELAY, DEBUG, RECALC_INTERVAL
     global MAC_ADDRESS, API_KEY, APPLICATION_KEY, BACKUP_MAC_ADDRESS, URL_TEMPLATE, START_DATE, CURRENT_DATE
     global OPENMETEO_LAT, OPENMETEO_LON, BUD_BREAK_START
+    global GRAPEVINE_CSV, SUNSPOT_CSV
 
     # Check if config.ini exists
-    if not os.path.exists('config.ini'):
-        log("Error: config.ini not found.")
+    if not os.path.exists(CONFIG_FILE):
+        log(f"Error: {CONFIG_FILE} not found.")
         sys.exit(1)
 
     config = configparser.ConfigParser()
     try:
-        config.read('config.ini')
+        config.read(CONFIG_FILE)
     except configparser.Error as e:
-        log(f"Error reading config.ini: {e}")
+        log(f"Error reading {CONFIG_FILE}: {e}")
         sys.exit(1)
 
     # Global configuration
-    DB_FILENAME = config.get('global', 'db_filename')
-    RETRY_SLEEP_TIME = config.getfloat('global', 'retry_sleep_time')
-    RATE_LIMIT_DELAY = config.getfloat('global', 'rate_limit_delay')
-    API_CALL_DELAY = config.getfloat('global', 'api_call_delay', fallback=1.0)
-    DEBUG = config.getboolean('global', 'debug', fallback=False)
-    RECALC_INTERVAL = config.getint('global', 'recalc_interval', fallback=300)
+    try:
+        raw_db_filename = config.get('global', 'db_filename')
+    except Exception as e:
+        log(f"Missing 'db_filename' in [global]: {e}")
+        sys.exit(1)
+    # Force DB_FILENAME to reside in a safe directory.
+    safe_dir = config.get('global', 'db_directory', fallback=os.getcwd())
+    DB_FILENAME = os.path.join(safe_dir, os.path.basename(raw_db_filename))
+    try:
+        RETRY_SLEEP_TIME = config.getfloat('global', 'retry_sleep_time')
+        RATE_LIMIT_DELAY = config.getfloat('global', 'rate_limit_delay')
+        API_CALL_DELAY = config.getfloat('global', 'api_call_delay', fallback=1.0)
+        DEBUG = config.getboolean('global', 'debug', fallback=False)
+        RECALC_INTERVAL = config.getint('global', 'recalc_interval', fallback=300)
+    except Exception as e:
+        log(f"Error in global configuration: {e}")
+        sys.exit(1)
 
     # Primary weather station configuration
-    MAC_ADDRESS = config.get('primary', 'mac_address')
-    API_KEY = config.get('primary', 'api_key')
-    APPLICATION_KEY = config.get('primary', 'application_key')
+    try:
+        MAC_ADDRESS = config.get('primary', 'mac_address')
+        API_KEY = config.get('primary', 'api_key')
+        APPLICATION_KEY = config.get('primary', 'application_key')
+    except Exception as e:
+        log(f"Error in primary configuration: {e}")
+        sys.exit(1)
 
     # Backup weather station configuration
-    BACKUP_MAC_ADDRESS = config.get('backup', 'mac_address')
+    try:
+        BACKUP_MAC_ADDRESS = config.get('backup', 'mac_address')
+    except Exception as e:
+        log(f"Error in backup configuration: {e}")
+        sys.exit(1)
 
     # API endpoint template for Ambient Weather
-    URL_TEMPLATE = config.get('api', 'url_template')
+    try:
+        URL_TEMPLATE = config.get('api', 'url_template')
+    except Exception as e:
+        log(f"Error in API configuration: {e}")
+        sys.exit(1)
 
     # Date configuration
     try:
@@ -62,15 +91,23 @@ def reload_config() -> None:
         sys.exit(1)
     CURRENT_DATE = datetime.now(timezone.utc).date()
 
-    # --- Read bud_break_start from config or default to January 1 of the current year ---
+    # Read bud_break_start from config or default to January 1 of the current year
     try:
         BUD_BREAK_START = datetime.strptime(config.get('date', 'bud_break_start'), "%Y-%m-%d").date()
     except Exception:
         BUD_BREAK_START = datetime(datetime.now(timezone.utc).year, 1, 1).date()
 
     # Open-Meteo configuration (for fallback)
-    OPENMETEO_LAT = config.getfloat('openmeteo', 'latitude')
-    OPENMETEO_LON = config.getfloat('openmeteo', 'longitude')
+    try:
+        OPENMETEO_LAT = config.getfloat('openmeteo', 'latitude')
+        OPENMETEO_LON = config.getfloat('openmeteo', 'longitude')
+    except Exception as e:
+        log(f"Error in Open-Meteo configuration: {e}")
+        sys.exit(1)
+
+    # Optionally, move CSV filenames into config as well:
+    GRAPEVINE_CSV = config.get('files', 'grapevine_csv', fallback=GRAPEVINE_CSV)
+    SUNSPOT_CSV = config.get('files', 'sunspot_csv', fallback=SUNSPOT_CSV)
 
 # === Initial Config Load ===
 reload_config()
@@ -85,182 +122,220 @@ fields_order = [
 ]
 
 # === Open SQLite Database and Create Tables ===
-conn = sqlite3.connect(DB_FILENAME)
-cursor = conn.cursor()
+try:
+    conn = sqlite3.connect(DB_FILENAME)
+    cursor = conn.cursor()
+except Exception as e:
+    log(f"Error connecting to database: {e}")
+    sys.exit(1)
 
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS readings (
-    dateutc INTEGER PRIMARY KEY,
-    date TEXT,
-    tempf REAL,
-    humidity REAL,
-    baromrelin REAL,
-    baromabsin REAL,
-    feelsLike REAL,
-    dewPoint REAL,
-    winddir REAL,
-    windspeedmph REAL,
-    windgustmph REAL,
-    maxdailygust REAL,
-    windgustdir REAL,
-    winddir_avg2m REAL,
-    windspdmph_avg2m REAL,
-    winddir_avg10m REAL,
-    windspdmph_avg10m REAL,
-    hourlyrainin REAL,
-    dailyrainin REAL,
-    monthlyrainin REAL,
-    yearlyrainin REAL,
-    battin REAL,
-    battout REAL,
-    tempinf REAL,
-    humidityin REAL,
-    feelsLikein REAL,
-    dewPointin REAL,
-    lastRain TEXT,
-    passkey TEXT,
-    time INTEGER,
-    loc TEXT,
-    gdd REAL DEFAULT 0,
-    gdd_hourly REAL DEFAULT 0,
-    gdd_daily REAL DEFAULT 0,
-    is_generated INTEGER DEFAULT 0,
-    mac_source TEXT DEFAULT NULL
-);
-""")
+def execute_sql(statement, params=()):
+    try:
+        cursor.execute(statement, params)
+    except sqlite3.Error as e:
+        log(f"SQL error: {e} while executing: {statement} with params: {params}")
+        conn.rollback()
+
+# Create tables with exception handling.
+try:
+    execute_sql("""
+    CREATE TABLE IF NOT EXISTS readings (
+        dateutc INTEGER PRIMARY KEY,
+        date TEXT,
+        tempf REAL,
+        humidity REAL,
+        baromrelin REAL,
+        baromabsin REAL,
+        feelsLike REAL,
+        dewPoint REAL,
+        winddir REAL,
+        windspeedmph REAL,
+        windgustmph REAL,
+        maxdailygust REAL,
+        windgustdir REAL,
+        winddir_avg2m REAL,
+        windspdmph_avg2m REAL,
+        winddir_avg10m REAL,
+        windspdmph_avg10m REAL,
+        hourlyrainin REAL,
+        dailyrainin REAL,
+        monthlyrainin REAL,
+        yearlyrainin REAL,
+        battin REAL,
+        battout REAL,
+        tempinf REAL,
+        humidityin REAL,
+        feelsLikein REAL,
+        dewPointin REAL,
+        lastRain TEXT,
+        passkey TEXT,
+        time INTEGER,
+        loc TEXT,
+        gdd REAL DEFAULT 0,
+        gdd_hourly REAL DEFAULT 0,
+        gdd_daily REAL DEFAULT 0,
+        is_generated INTEGER DEFAULT 0,
+        mac_source TEXT DEFAULT NULL
+    );
+    """)
+    conn.commit()
+except Exception as e:
+    log(f"Error creating 'readings' table: {e}")
+    sys.exit(1)
+
+# Create indexes.
+execute_sql("CREATE INDEX IF NOT EXISTS idx_readings_day ON readings (substr(date, 1, 10));")
+execute_sql("CREATE INDEX IF NOT EXISTS idx_gdd ON readings (gdd);")
 conn.commit()
 
-cursor.execute("CREATE INDEX IF NOT EXISTS idx_readings_day ON readings (substr(date, 1, 10));")
-cursor.execute("CREATE INDEX IF NOT EXISTS idx_gdd ON readings (gdd);")
-conn.commit()
+# === Import CSV Data into grapevine_gdd Table ===
+try:
+    execute_sql("""
+    CREATE TABLE IF NOT EXISTS grapevine_gdd (
+        variety TEXT PRIMARY KEY,
+        heat_summation INTEGER
+    );
+    """)
+    conn.commit()
+except Exception as e:
+    log(f"Error creating 'grapevine_gdd' table: {e}")
+    sys.exit(1)
 
-# === Import CSV Data into a New Table (grapevine_gdd) ===
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS grapevine_gdd (
-    variety TEXT PRIMARY KEY,
-    heat_summation INTEGER
-);
-""")
-conn.commit()
-
-with open("grapevine_gdd.csv", "r", newline='') as csvfile:
-    reader = csv.reader(csvfile)
-    header = next(reader)
-    required_headers = ['variety', 'heat_summation']
-    if header != required_headers:
-        log(f"Unexpected CSV headers in grapevine_gdd.csv: {header}. Expected: {required_headers}")
-    for row in reader:
-        if len(row) < 2:
-            continue
-        variety, heat_summation = row
+# Instead of enforcing an exact header, we check required columns.
+required_headers = ['variety', 'heat_summation']
+try:
+    with open(GRAPEVINE_CSV, "r", newline='') as csvfile:
+        reader = csv.reader(csvfile)
+        header = next(reader)
         try:
-            heat_summation = int(heat_summation)
-        except ValueError:
-            heat_summation = None
-        cursor.execute("""
-            INSERT OR REPLACE INTO grapevine_gdd (variety, heat_summation)
-            VALUES (?, ?)
-        """, (variety, heat_summation))
-conn.commit()
+            variety_idx = header.index("variety")
+            heat_idx = header.index("heat_summation")
+        except ValueError as ve:
+            log(f"Required column missing in {GRAPEVINE_CSV}: {ve}")
+            sys.exit(1)
+        for row in reader:
+            if len(row) <= max(variety_idx, heat_idx):
+                continue
+            variety = row[variety_idx]
+            try:
+                heat_summation = int(row[heat_idx])
+            except ValueError:
+                heat_summation = None
+            execute_sql("""
+                INSERT OR REPLACE INTO grapevine_gdd (variety, heat_summation)
+                VALUES (?, ?)
+            """, (variety, heat_summation))
+    conn.commit()
+except Exception as e:
+    log(f"Error processing {GRAPEVINE_CSV}: {e}")
 
 # === Import SunSpot Count Data from CSV ===
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS sunspots (
-    year INTEGER,
-    month INTEGER,
-    day INTEGER,
-    fraction REAL,
-    daily_total INTEGER,
-    std_dev REAL,
-    num_obs INTEGER,
-    definitive INTEGER,
-    date TEXT,
-    PRIMARY KEY (year, month, day)
-);
-""")
-conn.commit()
+try:
+    execute_sql("""
+    CREATE TABLE IF NOT EXISTS sunspots (
+        year INTEGER,
+        month INTEGER,
+        day INTEGER,
+        fraction REAL,
+        daily_total INTEGER,
+        std_dev REAL,
+        num_obs INTEGER,
+        definitive INTEGER,
+        date TEXT,
+        PRIMARY KEY (year, month, day)
+    );
+    """)
+    conn.commit()
+except Exception as e:
+    log(f"Error creating 'sunspots' table: {e}")
+    sys.exit(1)
 
 sunspot_url = "https://www.sidc.be/SILSO/INFO/sndtotcsv.php?"
-local_file = "SN_d_tot_V2.0.csv"
-
-head_response = requests.head(sunspot_url)
-remote_last_modified = None
-if head_response.status_code == 200:
-    remote_last_modified_str = head_response.headers.get("Last-Modified")
-    if remote_last_modified_str:
-        try:
-            remote_last_modified = datetime.strptime(remote_last_modified_str, "%a, %d %b %Y %H:%M:%S GMT").replace(tzinfo=timezone.utc)
-        except Exception as ex:
-            log(f"Error parsing remote Last-Modified header: {ex}")
-
 download_file = True
-if remote_last_modified and os.path.exists(local_file):
-    local_mod_timestamp = os.path.getmtime(local_file)
-    local_mod_datetime = datetime.fromtimestamp(local_mod_timestamp, timezone.utc)
-    if remote_last_modified <= local_mod_datetime:
-        log("Sunspot CSV has not changed; skipping download.")
-        download_file = False
+try:
+    head_response = requests.head(sunspot_url)
+    remote_last_modified = None
+    if head_response.status_code == 200:
+        remote_last_modified_str = head_response.headers.get("Last-Modified")
+        if remote_last_modified_str:
+            try:
+                remote_last_modified = datetime.strptime(remote_last_modified_str, "%a, %d %b %Y %H:%M:%S GMT").replace(tzinfo=timezone.utc)
+            except Exception as ex:
+                log(f"Error parsing remote Last-Modified header: {ex}")
+    if remote_last_modified and os.path.exists(SUNSPOT_CSV):
+        local_mod_timestamp = os.path.getmtime(SUNSPOT_CSV)
+        local_mod_datetime = datetime.fromtimestamp(local_mod_timestamp, timezone.utc)
+        if remote_last_modified <= local_mod_datetime:
+            log("Sunspot CSV has not changed; skipping download.")
+            download_file = False
+except Exception as e:
+    log(f"Error during sunspot CSV header check: {e}")
+    download_file = True
 
 if download_file:
-    response = requests.get(sunspot_url)
-    if response.status_code == 200:
-        with open(local_file, "w", newline="") as f:
-            f.write(response.text)
-        log("Sunspot data updated from SIDC.")
-    else:
-        log(f"Failed to fetch sunspot data. HTTP Status Code: {response.status_code}")
+    try:
+        response = requests.get(sunspot_url)
+        if response.status_code == 200:
+            with open(SUNSPOT_CSV, "w", newline="") as f:
+                f.write(response.text)
+            log("Sunspot data updated from SIDC.")
+        else:
+            log(f"Failed to fetch sunspot data. HTTP Status Code: {response.status_code}")
+    except Exception as e:
+        log(f"Exception during sunspot CSV download: {e}")
 
-with open(local_file, "r", newline="") as f:
-    csv_data = f.read()
-
-csvfile = StringIO(csv_data)
-reader = csv.reader(csvfile, delimiter=";")
-header = next(reader)  # Skip header row
-for row in reader:
-    if len(row) < 8:
-        continue
-    try:
-        year = int(row[0])
-    except Exception:
-        continue
-    if year < 2010:
-        continue
-    try:
-        month = int(row[1])
-        day = int(row[2])
-    except Exception:
-        continue
-    try:
-        fraction = float(row[3])
-    except Exception:
-        fraction = None
-    try:
-        daily_total = int(row[4])
-        if daily_total == -1:
+try:
+    with open(SUNSPOT_CSV, "r", newline="") as f:
+        csv_data = f.read()
+    csvfile = StringIO(csv_data)
+    reader = csv.reader(csvfile, delimiter=";")
+    header = next(reader)  # Skip header row
+    for row in reader:
+        if len(row) < 8:
+            continue
+        try:
+            year = int(row[0])
+        except Exception:
+            continue
+        if year < 2010:
+            continue
+        try:
+            month = int(row[1])
+            day = int(row[2])
+        except Exception:
+            continue
+        try:
+            fraction = float(row[3])
+        except Exception:
+            fraction = None
+        try:
+            daily_total = int(row[4])
+            if daily_total == -1:
+                daily_total = None
+        except Exception:
             daily_total = None
-    except Exception:
-        daily_total = None
-    try:
-        std_dev = float(row[5])
-    except Exception:
-        std_dev = None
-    try:
-        num_obs = int(row[6])
-    except Exception:
-        num_obs = None
-    try:
-        definitive = int(row[7])
-    except Exception:
-        definitive = None
-    date_str = f"{year:04d}-{month:02d}-{day:02d}"
-    cursor.execute("""
-        INSERT OR REPLACE INTO sunspots 
-        (year, month, day, fraction, daily_total, std_dev, num_obs, definitive, date)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (year, month, day, fraction, daily_total, std_dev, num_obs, definitive, date_str))
-conn.commit()
-
-log("Sunspot CSV processed from local file.")
+        try:
+            std_dev = float(row[5])
+        except Exception:
+            std_dev = None
+        try:
+            num_obs = int(row[6])
+        except Exception:
+            num_obs = None
+        try:
+            definitive = int(row[7])
+        except Exception:
+            definitive = None
+        date_str = f"{year:04d}-{month:02d}-{day:02d}"
+        execute_sql("""
+            INSERT OR REPLACE INTO sunspots 
+            (year, month, day, fraction, daily_total, std_dev, num_obs, definitive, date)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (year, month, day, fraction, daily_total, std_dev, num_obs, definitive, date_str))
+    conn.commit()
+    log("Sunspot CSV processed from local file.")
+except Exception as e:
+    log(f"Error processing {SUNSPOT_CSV}: {e}")
 
 # === Function: Recalculate Cumulative, Hourly, and Daily GDD ===
 def recalcGDD(full: bool = False) -> None:
@@ -274,39 +349,46 @@ def recalcGDD(full: bool = False) -> None:
         log("Performing full GDD recalculation from the beginning...")
     else:
         log("Performing incremental GDD recalculation...")
+    try:
+        cursor.execute("SELECT DISTINCT substr(date, 1, 4) as year FROM readings ORDER BY year ASC")
+        years = [row[0] for row in cursor.fetchall()]
+    except sqlite3.Error as e:
+        log(f"Error fetching distinct years: {e}")
+        return
 
-    cursor.execute("SELECT DISTINCT substr(date, 1, 4) as year FROM readings ORDER BY year ASC")
-    years = [row[0] for row in cursor.fetchall()]
     for year in years:
-        if full:
-            cumulative_gdd = 0
-            log(f"For year {year}, starting full recalculation from beginning with cumulative GDD {cumulative_gdd:.3f}.")
-            cursor.execute("SELECT dateutc, tempf, date FROM readings WHERE substr(date, 1, 4)=? ORDER BY dateutc ASC", (year,))
-        else:
-            cursor.execute("SELECT MAX(dateutc), gdd FROM readings WHERE substr(date, 1, 4)=? AND gdd>0", (year,))
-            result = cursor.fetchone()
-            if result[0] is not None:
-                last_dateutc = result[0]
-                cumulative_gdd = result[1]
-                log(f"For year {year}, starting incremental recalculation from dateutc {last_dateutc} with cumulative GDD {cumulative_gdd:.3f}.")
-                cursor.execute("SELECT dateutc, tempf, date FROM readings WHERE substr(date, 1, 4)=? AND dateutc > ? ORDER BY dateutc ASC", (year, last_dateutc))
-            else:
+        try:
+            if full:
                 cumulative_gdd = 0
-                log(f"For year {year}, no previous GDD found. Recalculating from start.")
+                log(f"For year {year}, starting full recalculation from beginning with cumulative GDD {cumulative_gdd:.3f}.")
                 cursor.execute("SELECT dateutc, tempf, date FROM readings WHERE substr(date, 1, 4)=? ORDER BY dateutc ASC", (year,))
-        rows = cursor.fetchall()
-        for dateutc, tempf, date_str in rows:
-            if tempf is None:
-                continue
-            try:
-                val = float(tempf)
-            except Exception as e:
-                log(f"Skipping record {dateutc} due to invalid tempf: {tempf}")
-                continue
-            temp_c = (val - 32) * 5 / 9
-            inc = max(0, (temp_c - base_temp_C)) / 288
-            cumulative_gdd += inc
-            cursor.execute("UPDATE readings SET gdd = ? WHERE dateutc = ?", (cumulative_gdd, dateutc))
+            else:
+                cursor.execute("SELECT MAX(dateutc), gdd FROM readings WHERE substr(date, 1, 4)=? AND gdd>0", (year,))
+                result = cursor.fetchone()
+                if result[0] is not None:
+                    last_dateutc = result[0]
+                    cumulative_gdd = result[1]
+                    log(f"For year {year}, starting incremental recalculation from dateutc {last_dateutc} with cumulative GDD {cumulative_gdd:.3f}.")
+                    cursor.execute("SELECT dateutc, tempf, date FROM readings WHERE substr(date, 1, 4)=? AND dateutc > ? ORDER BY dateutc ASC", (year, last_dateutc))
+                else:
+                    cumulative_gdd = 0
+                    log(f"For year {year}, no previous GDD found. Recalculating from start.")
+                    cursor.execute("SELECT dateutc, tempf, date FROM readings WHERE substr(date, 1, 4)=? ORDER BY dateutc ASC", (year,))
+            rows = cursor.fetchall()
+            for dateutc, tempf, date_str in rows:
+                if tempf is None:
+                    continue
+                try:
+                    val = float(tempf)
+                except Exception as e:
+                    log(f"Skipping record {dateutc} due to invalid tempf: {tempf}")
+                    continue
+                temp_c = (val - 32) * 5 / 9
+                inc = max(0, (temp_c - base_temp_C)) / 288
+                cumulative_gdd += inc
+                execute_sql("UPDATE readings SET gdd = ? WHERE dateutc = ?", (cumulative_gdd, dateutc))
+        except sqlite3.Error as e:
+            log(f"Error during GDD recalculation for year {year}: {e}")
     conn.commit()
     if full:
         log("Full GDD recalculation complete.")
@@ -508,15 +590,22 @@ def fill_missing_data_by_gap(day_str: str) -> None:
     Inserted rows get is_generated = 1 and mac_source = "INTERP".
     Also fills gaps at the beginning (from 00:00) and at the end (to 23:55).
     """
-    dt_day = datetime.strptime(day_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    try:
+        dt_day = datetime.strptime(day_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except Exception as e:
+        log(f"Error parsing day_str {day_str}: {e}")
+        return
     expected_start = int(dt_day.timestamp())
     expected_end = expected_start + (287 * 300)
-
-    cursor.execute(
-        "SELECT dateutc, tempf FROM readings WHERE substr(date, 1, 10)=? ORDER BY dateutc ASC",
-        (day_str,)
-    )
-    rows = cursor.fetchall()
+    try:
+        cursor.execute(
+            "SELECT dateutc, tempf FROM readings WHERE substr(date, 1, 10)=? ORDER BY dateutc ASC",
+            (day_str,)
+        )
+        rows = cursor.fetchall()
+    except sqlite3.Error as e:
+        log(f"Error fetching readings for {day_str}: {e}")
+        return
     if not rows:
         log(f"No readings found for {day_str} to interpolate.")
         return
@@ -530,14 +619,12 @@ def fill_missing_data_by_gap(day_str: str) -> None:
             interp_temp = first_temp
             dt_new = datetime.fromtimestamp(new_ts, tz=timezone.utc)
             new_date_str = dt_new.isoformat() + "Z"
-            sql = """
+            execute_sql("""
                 INSERT OR REPLACE INTO readings
                 (dateutc, date, tempf, gdd, gdd_hourly, gdd_daily, is_generated, mac_source)
                 VALUES (?, ?, ?, 0, 0, 0, 1, "INTERP")
-            """
-            cursor.execute(sql, (new_ts, new_date_str, round(interp_temp, 1)))
+            """, (new_ts, new_date_str, round(interp_temp, 1)))
             log(f"Interpolated (start) reading for {new_date_str}: tempf {round(interp_temp, 1)}")
-
     for i in range(len(rows) - 1):
         t1, temp1 = rows[i]
         t2, temp2 = rows[i + 1]
@@ -553,14 +640,12 @@ def fill_missing_data_by_gap(day_str: str) -> None:
                 interp_temp = round(interp_temp, 1)
                 dt_new = datetime.fromtimestamp(new_ts, tz=timezone.utc)
                 new_date_str = dt_new.isoformat() + "Z"
-                sql = """
+                execute_sql("""
                     INSERT OR REPLACE INTO readings
                     (dateutc, date, tempf, gdd, gdd_hourly, gdd_daily, is_generated, mac_source)
                     VALUES (?, ?, ?, 0, 0, 0, 1, "INTERP")
-                """
-                cursor.execute(sql, (new_ts, new_date_str, interp_temp))
+                """, (new_ts, new_date_str, interp_temp))
                 log(f"Interpolated reading for {new_date_str}: tempf {interp_temp:.1f}")
-
     last_ts, last_temp = rows[-1]
     if last_ts < expected_end:
         gap = expected_end - last_ts
@@ -570,12 +655,11 @@ def fill_missing_data_by_gap(day_str: str) -> None:
             interp_temp = last_temp
             dt_new = datetime.fromtimestamp(new_ts, tz=timezone.utc)
             new_date_str = dt_new.isoformat() + "Z"
-            sql = """
+            execute_sql("""
                 INSERT OR REPLACE INTO readings
                 (dateutc, date, tempf, gdd, gdd_hourly, gdd_daily, is_generated, mac_source)
                 VALUES (?, ?, ?, 0, 0, 0, 1, "INTERP")
-            """
-            cursor.execute(sql, (new_ts, new_date_str, round(interp_temp, 1)))
+            """, (new_ts, new_date_str, round(interp_temp, 1)))
             log(f"Interpolated (end) reading for {new_date_str}: tempf {round(interp_temp, 1)}")
     conn.commit()
 
@@ -584,10 +668,12 @@ def fill_missing_data_by_gap(day_str: str) -> None:
 ##############################
 def append_forecast_data() -> None:
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    cursor.execute("DELETE FROM readings WHERE substr(date, 1, 10) >= ?", (today_str,))
-    conn.commit()
+    try:
+        execute_sql("DELETE FROM readings WHERE substr(date, 1, 10) >= ?", (today_str,))
+        conn.commit()
+    except sqlite3.Error as e:
+        log(f"Error deleting forecast data: {e}")
     log(f"Deleted existing forecast data from readings table (rows with date >= {today_str}).")
-
     forecast_df = fetch_openmeteo_forecast()
     if forecast_df is not None and not forecast_df.empty:
         import pandas as pd
@@ -596,13 +682,12 @@ def append_forecast_data() -> None:
             ts = int(dt_forecast.timestamp())
             forecast_date_str = dt_forecast.isoformat() + "Z"
             tempf = row["temperature_2m"]
-            sql = """
-                INSERT OR REPLACE INTO readings
-                (dateutc, date, tempf, gdd, gdd_hourly, gdd_daily, is_generated, mac_source)
-                VALUES (?, ?, ?, 0, 0, 0, 1, ?)
-            """
             try:
-                cursor.execute(sql, (ts, forecast_date_str, tempf, "OPENMETEO"))
+                execute_sql("""
+                    INSERT OR REPLACE INTO readings
+                    (dateutc, date, tempf, gdd, gdd_hourly, gdd_daily, is_generated, mac_source)
+                    VALUES (?, ?, ?, 0, 0, 0, 1, ?)
+                """, (ts, forecast_date_str, tempf, "OPENMETEO"))
             except Exception as ex:
                 log(f"Error inserting forecast reading for {forecast_date_str}: {ex}")
         conn.commit()
@@ -619,17 +704,25 @@ def project_bud_break_regression() -> None:
     perform a linear regression (DOY vs. year), and use the trend to predict the current year's bud break.
     Update grapevine_gdd with the predicted bud break date.
     """
-    # Add the new column if it doesn't exist.
     try:
-        cursor.execute("ALTER TABLE grapevine_gdd ADD COLUMN projected_bud_break TEXT")
+        # Try to add the new column; if it already exists, log and continue.
+        execute_sql("ALTER TABLE grapevine_gdd ADD COLUMN projected_bud_break TEXT")
         conn.commit()
-    except sqlite3.OperationalError:
-        pass
+        log("Added column projected_bud_break to grapevine_gdd.")
+    except sqlite3.OperationalError as e:
+        if "duplicate column name: projected_bud_break" in str(e):
+            log("Column projected_bud_break already exists, skipping addition.")
+        else:
+            log(f"Error adding column projected_bud_break: {e}")
 
     current_year = datetime.now(timezone.utc).year
     historical_years = list(range(2012, current_year))  # use past years
-    cursor.execute("SELECT variety, heat_summation FROM grapevine_gdd")
-    varieties = cursor.fetchall()
+    try:
+        cursor.execute("SELECT variety, heat_summation FROM grapevine_gdd")
+        varieties = cursor.fetchall()
+    except sqlite3.Error as e:
+        log(f"Error fetching grapevine_gdd data: {e}")
+        return
 
     for variety, heat_sum in varieties:
         if heat_sum is None:
@@ -637,10 +730,14 @@ def project_bud_break_regression() -> None:
             continue
         data_points = []  # list of (year, bud_break_doy)
         for yr in historical_years:
-            cursor.execute(
-                "SELECT date FROM readings WHERE substr(date, 1, 4)=? AND gdd >= ? ORDER BY date ASC LIMIT 1",
-                (str(yr), heat_sum)
-            )
+            try:
+                cursor.execute(
+                    "SELECT date FROM readings WHERE substr(date, 1, 4)=? AND gdd >= ? ORDER BY date ASC LIMIT 1",
+                    (str(yr), heat_sum)
+                )
+            except sqlite3.Error as e:
+                log(f"Error fetching readings for year {yr}: {e}")
+                continue
             row = cursor.fetchone()
             if row:
                 try:
@@ -662,7 +759,7 @@ def project_bud_break_regression() -> None:
         predicted_doy = slope * current_year + intercept
         predicted_doy = max(1, min(366, predicted_doy))
         predicted_date = (datetime(current_year, 1, 1) + timedelta(days=predicted_doy - 1)).date()
-        cursor.execute("""
+        execute_sql("""
             UPDATE grapevine_gdd
             SET projected_bud_break = ?
             WHERE variety = ?
@@ -680,8 +777,12 @@ day = START_DATE.date()
 while day < CURRENT_DATE:
     reload_config()
     day_str = day.strftime("%Y-%m-%d")
-    cursor.execute("SELECT COUNT(*) FROM readings WHERE substr(date,1,10)=?", (day_str,))
-    old_count = cursor.fetchone()[0]
+    try:
+        cursor.execute("SELECT COUNT(*) FROM readings WHERE substr(date,1,10)=?", (day_str,))
+        old_count = cursor.fetchone()[0]
+    except sqlite3.Error as e:
+        log(f"Error fetching count for {day_str}: {e}")
+        old_count = 0
 
     # --- Primary Data Insertion ---
     if old_count >= 287:
@@ -730,15 +831,22 @@ while day < CURRENT_DATE:
                     log(f"Error inserting primary reading for {values.get('date')}: {ex}")
                     continue
             conn.commit()
-            cursor.execute("SELECT COUNT(*) FROM readings WHERE substr(date,1,10)=?", (day_str,))
-            new_count = cursor.fetchone()[0]
-            inserted_count = new_count - old_count
-            new_total += inserted_count
-            log(f"Inserted {inserted_count} new primary readings for {day_str} (total now: {new_count}).")
+            try:
+                cursor.execute("SELECT COUNT(*) FROM readings WHERE substr(date,1,10)=?", (day_str,))
+                new_count = cursor.fetchone()[0]
+                inserted_count = new_count - old_count
+                new_total += inserted_count
+                log(f"Inserted {inserted_count} new primary readings for {day_str} (total now: {new_count}).")
+            except sqlite3.Error as e:
+                log(f"Error fetching new count for {day_str}: {e}")
 
     # --- Backup Data Insertion ---
-    cursor.execute("SELECT COUNT(*) FROM readings WHERE substr(date,1,10)=? AND tempf IS NOT NULL", (day_str,))
-    valid_count = cursor.fetchone()[0]
+    try:
+        cursor.execute("SELECT COUNT(*) FROM readings WHERE substr(date,1,10)=? AND tempf IS NOT NULL", (day_str,))
+        valid_count = cursor.fetchone()[0]
+    except sqlite3.Error as e:
+        log(f"Error fetching valid count for {day_str}: {e}")
+        valid_count = 0
     if valid_count < 287:
         log(f"{day_str}: Only {valid_count} valid readings from primary. Attempting to use backup data.")
         next_day = day + timedelta(days=1)
@@ -760,8 +868,12 @@ while day < CURRENT_DATE:
                 backup_values = {key: backup_reading.get(key, None) for key in fields_order}
                 backup_values["dateutc"] = ts
                 backup_values["date"] = dt.isoformat() + "Z"
-                cursor.execute("SELECT tempf FROM readings WHERE dateutc = ?", (ts,))
-                existing = cursor.fetchone()
+                try:
+                    cursor.execute("SELECT tempf FROM readings WHERE dateutc = ?", (ts,))
+                    existing = cursor.fetchone()
+                except sqlite3.Error as e:
+                    log(f"Error checking existing backup reading for {raw_date}: {e}")
+                    continue
                 if existing is None:
                     sql = f"""
                         INSERT OR IGNORE INTO readings
@@ -787,8 +899,11 @@ while day < CURRENT_DATE:
                         except Exception as ex:
                             log(f"Error updating backup reading for {raw_date}: {ex}")
             conn.commit()
-            cursor.execute("SELECT COUNT(*) FROM readings WHERE substr(date,1,10)=? AND tempf IS NOT NULL", (day_str,))
-            valid_count = cursor.fetchone()[0]
+            try:
+                cursor.execute("SELECT COUNT(*) FROM readings WHERE substr(date,1,10)=? AND tempf IS NOT NULL", (day_str,))
+                valid_count = cursor.fetchone()[0]
+            except sqlite3.Error as e:
+                log(f"Error fetching valid count after backup for {day_str}: {e}")
         else:
             log(f"No backup data received for {day_str}.")
 
@@ -801,6 +916,7 @@ while day < CURRENT_DATE:
             df = df_obj
             if not df.empty:
                 for idx, row in df.iterrows():
+                    import pandas as pd
                     if pd.isnull(row['tempf']):
                         log(f"Skipping row {idx} due to missing tempf value.")
                         continue
@@ -821,9 +937,12 @@ while day < CURRENT_DATE:
                     except Exception as ex:
                         log(f"Error inserting Open-Meteo reading for {date_str}: {ex}")
                 conn.commit()
-                cursor.execute("SELECT COUNT(*) FROM readings WHERE substr(date,1,10)=? AND tempf IS NOT NULL", (day_str,))
-                valid_count = cursor.fetchone()[0]
-                log(f"After Open-Meteo fallback, valid readings for {day_str}: {valid_count}")
+                try:
+                    cursor.execute("SELECT COUNT(*) FROM readings WHERE substr(date,1,10)=? AND tempf IS NOT NULL", (day_str,))
+                    valid_count = cursor.fetchone()[0]
+                    log(f"After Open-Meteo fallback, valid readings for {day_str}: {valid_count}")
+                except sqlite3.Error as e:
+                    log(f"Error fetching valid count after Open-Meteo for {day_str}: {e}")
             else:
                 log(f"No Open-Meteo data received for {day_str}.")
         else:
@@ -835,17 +954,21 @@ while day < CURRENT_DATE:
         fill_missing_data_by_gap(day_str)
     else:
         log(f"{day_str}: All intervals have valid temperature data.")
-
-    cursor.execute("SELECT COUNT(*) FROM readings WHERE substr(date, 1, 10)=?", (day_str,))
-    final_day_count = cursor.fetchone()[0]
-    log(f"After interpolation, {day_str} has {final_day_count} readings.")
-
-    cursor.execute("SELECT COUNT(*) FROM readings")
-    totalRowCount = cursor.fetchone()[0]
+    try:
+        cursor.execute("SELECT COUNT(*) FROM readings WHERE substr(date, 1, 10)=?", (day_str,))
+        final_day_count = cursor.fetchone()[0]
+        log(f"After interpolation, {day_str} has {final_day_count} readings.")
+    except sqlite3.Error as e:
+        log(f"Error fetching final count for {day_str}: {e}")
+    try:
+        cursor.execute("SELECT COUNT(*) FROM readings")
+        totalRowCount = cursor.fetchone()[0]
+    except sqlite3.Error as e:
+        log(f"Error fetching total row count: {e}")
+        totalRowCount = 0
     if totalRowCount - lastRecalcRowCount >= RECALC_INTERVAL:
         recalcGDD()
         lastRecalcRowCount = totalRowCount
-
     day = day + timedelta(days=1)
 
 ##############################
@@ -855,7 +978,7 @@ append_forecast_data()
 
 # --- Final Recalculation of GDD ---
 log("Clearing all GDD values before full recalculation...")
-cursor.execute("UPDATE readings SET gdd = NULL")
+execute_sql("UPDATE readings SET gdd = NULL")
 conn.commit()
 
 log("Performing final full recalculation of cumulative, hourly, and daily GDD...")

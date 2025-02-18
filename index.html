@@ -18,10 +18,12 @@
             padding: 0;
             overflow-x: hidden;
         }
+
         h1, h2, h3 {
             text-align: center;
             margin: 10px 0;
         }
+
         /* Toggle buttons for slide-out panels */
         #toggleLeftPanel, #toggleRightPanel {
             position: fixed;
@@ -34,17 +36,21 @@
             padding: 8px 12px;
             cursor: pointer;
         }
+
         #toggleLeftPanel {
             left: 0;
         }
+
         #toggleRightPanel {
             right: 0;
         }
+
         /* Auto Refresh Toggle Control */
         #autoRefreshControl {
             text-align: center;
             margin: 10px 0;
         }
+
         /* Flex container for panels and chart */
         .flex-container {
             display: flex;
@@ -54,6 +60,7 @@
             box-sizing: border-box;
             transition: margin 0.3s ease;
         }
+
         /* Left slide-out panel (months) */
         #leftPanel {
             width: fit-content;
@@ -63,11 +70,13 @@
             padding: 10px;
             text-align: left;
         }
+
         #leftPanel.hidden {
             width: 0;
             padding: 0;
             overflow: hidden;
         }
+
         /* Right slide-out panel (years) */
         #rightPanel {
             width: fit-content;
@@ -77,19 +86,22 @@
             padding: 10px;
             text-align: right;
         }
+
         #rightPanel.hidden {
             width: 0;
             padding: 0;
             overflow: hidden;
         }
+
         /* Chart container fills remaining space */
         #chartContainer {
-            position: relative;  /* Added to allow absolute positioning inside */
+            position: relative; /* Added to allow absolute positioning inside */
             flex: 1;
             padding: 10px;
             box-sizing: border-box;
             height: 80vh; /* 80% of viewport height */
         }
+
         /* Ensure the canvas fills its container */
         canvas {
             background: #fff;
@@ -99,11 +111,13 @@
             height: 100% !important;
             display: block;
         }
+
         /* Ensure the checkboxes are stacked */
         #monthControls label, #yearControls label {
             display: block;
             margin: 5px 0;
         }
+
         /* Custom legend container styling for the bottom legend */
         #legendContainer {
             display: flex;
@@ -114,6 +128,7 @@
             padding: 5px;
             box-sizing: border-box;
         }
+
         /* Updated legend item style for bottom legend (no button look) */
         #legendContainer .legend-item {
             display: inline-flex;
@@ -127,6 +142,7 @@
             border-radius: 0;
             cursor: pointer;
         }
+
         /* Tooltip for vertical line labels */
         #vlineTooltip {
             position: absolute;
@@ -186,7 +202,10 @@
         <!-- Chart Container -->
         <div id="chartContainer">
             <!-- NEW: Export to PNG Button in top right -->
-            <button id="exportButton" style="position: absolute; top: 10px; right: 10px; z-index: 1000; padding: 10px 20px; font-size: 16px; cursor: pointer;">Export Chart to PNG</button>
+            <button id="exportButton"
+                    style="position: absolute; top: 10px; right: 10px; z-index: 1000; padding: 10px 20px; font-size: 16px; cursor: pointer;">
+                Export Chart to PNG
+            </button>
             <h2>Daily Avg Temp, Cumulative GDD, Daily Rain & Bud Break</h2>
             <canvas id="dailyChart"></canvas>
             <!-- Bottom legend container for non–grape–varietal groups -->
@@ -213,6 +232,14 @@
 
     // Sample event flags for years (modify as needed)
     const yearEvents = {
+        "2000": ["Neutral", "Solar Max [8]"],
+        "2001": ["Neutral", "Solar Max [8]"],
+        "2002": ["Neutral", "Solar Transition [7]"],
+        "2003": ["El Niño", "Solar Transition [6]"],
+        "2004": ["Neutral", "Solar Transition [5]"],
+        "2005": ["Neutral", "Solar Transition [4]"],
+        "2006": ["Neutral", "Solar Transition [3]"],
+        "2007": ["El Niño", "Solar Transition [2]"],
         "2008": ["La Niña", "Solar Min [1]"],
         "2009": ["La Niña", "Solar Min [1]"],
         "2010": ["La Niña", "Solar Transition [2]"],
@@ -239,6 +266,7 @@
         afterDraw(chart, args, options) {
             const {ctx, chartArea: {left, right}, scales: {y}} = chart;
             if (!y) return;
+
             function drawLine(yValue, color, text) {
                 const yPixel = y.getPixelForValue(yValue);
                 ctx.save();
@@ -254,6 +282,7 @@
                 ctx.font = '12px Arial';
                 ctx.fillText(text, left + 5, yPixel - 5);
             }
+
             drawLine(32, 'green', 'Freeze (32°F)');
             drawLine(50, 'blue', 'Base Temp (50°F)');
             drawLine(86, 'red', 'Ceiling Temp (86°F)');
@@ -297,6 +326,7 @@
         const now = new Date().toISOString().replace("T", " ").replace("Z", "");
         console.log("[" + now + "] " + message);
     }
+
     function log_debug(message) {
         if (DEBUG) {
             log("[DEBUG] " + message);
@@ -320,6 +350,7 @@
             .map(cb => cb.value);
         localStorage.setItem("selectedYears", JSON.stringify(selYears));
     }
+
     function loadFilterSettings() {
         const storedMonths = localStorage.getItem("selectedMonths");
         if (storedMonths) {
@@ -350,6 +381,7 @@
             log("Auto Refresh started (every " + (AUTO_REFRESH_PERIOD / 1000) + " seconds).");
         }
     }
+
     function stopAutoRefresh() {
         if (refreshIntervalId) {
             clearInterval(refreshIntervalId);
@@ -625,6 +657,7 @@
         const stored = localStorage.getItem("legendGroupStates");
         return stored ? JSON.parse(stored) : {};
     }
+
     function saveLegendGroupStates(states) {
         localStorage.setItem("legendGroupStates", JSON.stringify(states));
     }
@@ -990,7 +1023,7 @@
 
     // --- NEW: Add tooltip on hover for vertical lines ---
     const tooltipEl = document.getElementById("vlineTooltip");
-    document.getElementById("dailyChart").addEventListener("mousemove", function(event) {
+    document.getElementById("dailyChart").addEventListener("mousemove", function (event) {
         if (!dailyChart) return;
         const canvasPosition = this.getBoundingClientRect();
         const xPos = event.clientX - canvasPosition.left;

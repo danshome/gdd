@@ -175,7 +175,18 @@
         Auto Refresh
     </label>
 </div>
-
+<!-- NEW: Mode Dropdown and Threshold Input (hidden by default) -->
+<div id="modeControl" style="text-align: center; margin: 10px 0;">
+    <label for="modeSelect">Mode:</label>
+    <select id="modeSelect">
+        <option value="normal" selected>Normal</option>
+        <option value="nearest">Nearest Neighbor</option>
+    </select>
+    <span id="thresholdContainer" style="display: none; margin-left: 10px;">
+      <label for="nnThreshold">Threshold:</label>
+      <input type="number" id="nnThreshold" value="10.0" step="0.1" style="width: 70px;">
+    </span>
+</div>
 <div class="container">
     <div class="flex-container">
         <!-- Left slide-out panel for Month Filters -->
@@ -220,10 +231,8 @@
         </div>
     </div>
 </div>
-
 <!-- Tooltip element for vertical line labels -->
 <div id="vlineTooltip"></div>
-
 <script>
     // Global auto-refresh settings
     let autoRefresh = true;
@@ -321,6 +330,9 @@
     let SQL;
     let selectedYears = []; // Global array for selected years
 
+    // Global persistent color mapping (per year)
+    let yearColorMapping = {};
+
     // --- Helper Functions for Logging ---
     function log(message) {
         const now = new Date().toISOString().replace("T", " ").replace("Z", "");
@@ -375,9 +387,18 @@
     }
 
     // --- Auto-Refresh Control Functions ---
+    function refreshData() {
+        const modeSelect = document.getElementById("modeSelect");
+        if (modeSelect && modeSelect.value === "nearest") {
+            applyNearestNeighborMode();
+        } else {
+            loadAndPlotData();
+        }
+    }
+
     function startAutoRefresh() {
         if (!refreshIntervalId) {
-            refreshIntervalId = setInterval(loadAndPlotData, AUTO_REFRESH_PERIOD);
+            refreshIntervalId = setInterval(refreshData, AUTO_REFRESH_PERIOD);
             log("Auto Refresh started (every " + (AUTO_REFRESH_PERIOD / 1000) + " seconds).");
         }
     }
@@ -412,7 +433,8 @@
             log("Database loaded successfully.");
             populateYearControls();
             loadFilterSettings();
-            loadAndPlotData();
+            // Initially call refreshData so that if mode is 'nearest', the nearest neighbor logic runs.
+            refreshData();
             startAutoRefresh();
             document.querySelectorAll("input[name='year']").forEach(cb => {
                 cb.addEventListener("change", function () {
@@ -475,23 +497,51 @@
             });
         }).catch(err => console.error("Error initializing database:", err));
 
-    // --- Populate Year Controls Dynamically with Event Flags ---
+    // Helper function: generate a distinct HSL color given an index and total count.
+    function generateDistinctColor(index, total) {
+        const hue = Math.floor((360 / total) * index);
+        // You can adjust the saturation (70%) and lightness (50%) as needed.
+        return `hsl(${hue}, 70%, 50%)`;
+    }
+
     function populateYearControls() {
+        // Load persistent mapping if it exists
+        let storedMapping = sessionStorage.getItem("yearColorMapping");
+        if (storedMapping) {
+            yearColorMapping = JSON.parse(storedMapping);
+        } else {
+            yearColorMapping = {};
+        }
+
         const res = db.exec("SELECT DISTINCT substr(date, 1, 4) as year FROM readings ORDER BY year ASC;");
         const yearControls = document.getElementById("yearControls");
         yearControls.innerHTML = "";
+
+        // Create the "All Years" checkbox first
         const allYearsLabel = document.createElement("label");
         allYearsLabel.innerHTML = `<input type="checkbox" id="allYears" checked> All Years`;
         yearControls.appendChild(allYearsLabel);
+
         if (res.length > 0) {
             const years = res[0].values.map(row => row[0]);
-            years.forEach(year => {
+            const totalYears = years.length;
+            years.forEach((year, index) => {
                 let labelText = year;
                 if (yearEvents.hasOwnProperty(year) && yearEvents[year].length > 0) {
                     labelText += " (" + yearEvents[year].join(", ") + ")";
                 }
+
+                // Assign a persistent distinct color if one does not exist yet.
+                if (!yearColorMapping[year]) {
+                    yearColorMapping[year] = generateDistinctColor(index, totalYears);
+                }
+                sessionStorage.setItem("yearColorMapping", JSON.stringify(yearColorMapping));
+
+                // Create a label with a small colored box next to the year
                 const label = document.createElement("label");
-                label.innerHTML = `<input type="checkbox" name="year" value="${year}" checked> ${labelText}`;
+                label.innerHTML = `<input type="checkbox" name="year" value="${year}" checked>
+                           <span style="display:inline-block; width:12px; height:12px; background-color:${yearColorMapping[year]}; margin-right:5px;"></span>
+                           ${labelText}`;
                 yearControls.appendChild(label);
             });
         }
@@ -662,6 +712,19 @@
         return `rgb(${r},${g},${b})`;
     }
 
+    // --- Lighten a given rgb color string by a given factor (0 to 1) ---
+    function lightenColor(rgbStr, factor) {
+        const result = /rgb\((\d+),\s*(\d+),\s*(\d+)\)/.exec(rgbStr);
+        if (!result) return rgbStr;
+        let r = parseInt(result[1]);
+        let g = parseInt(result[2]);
+        let b = parseInt(result[3]);
+        r = Math.floor(r + (255 - r) * factor);
+        g = Math.floor(g + (255 - g) * factor);
+        b = Math.floor(b + (255 - b) * factor);
+        return `rgb(${r},${g},${b})`;
+    }
+
     // --- Functions to get and save legend group states in localStorage ---
     function getLegendGroupStates() {
         const stored = localStorage.getItem("legendGroupStates");
@@ -805,6 +868,14 @@
         const selectedMonths = Array.from(monthCheckboxes).map(cb => parseInt(cb.value));
         if (selectedYears.length === 0 || selectedMonths.length === 0) return;
 
+        // Retrieve persistent year color mapping from sessionStorage (or initialize)
+        let storedMapping = sessionStorage.getItem("yearColorMapping");
+        if (storedMapping) {
+            yearColorMapping = JSON.parse(storedMapping);
+        } else {
+            yearColorMapping = {};
+        }
+
         let commonLabelsSet = new Set();
         let yearlyData = {};
         selectedYears.forEach(year => {
@@ -824,9 +895,18 @@
             const gddData = alignData(commonLabels, dataForYear, "maxCumGDD");
             const rainData = alignData(commonLabels, dataForYear, "rainTotal");
 
-            const rawTempColor = randomColor();
-            const bandFillColor = rawTempColor.replace("rgb(", "rgba(").replace(")", ",0.3)");
-            const colorAvg = darkenColor(rawTempColor, 0.5);
+            // Get or assign a persistent base color for this year
+            if (!yearColorMapping[year]) {
+                yearColorMapping[year] = randomColor();
+            }
+            let baseColor = yearColorMapping[year];
+            // Save updated mapping to sessionStorage so the color stays the same during the session
+            sessionStorage.setItem("yearColorMapping", JSON.stringify(yearColorMapping));
+
+            // Compute variants of the base color
+            let bandFillColor = baseColor.replace("rgb(", "rgba(").replace(")", ",0.3)");
+            let colorAvg = lightenColor(baseColor, 0.3);   // Avg Temp lighter than base
+            let colorRain = lightenColor(baseColor, 0.5);  // Rain Total even lighter
 
             let indexMin = datasets.length;
             datasets.push({
@@ -877,7 +957,7 @@
             datasets.push({
                 label: "Cumulative GDD - " + year,
                 data: gddData,
-                borderColor: (parseInt(year) === new Date().getFullYear()) ? "red" : randomColor(),
+                borderColor: baseColor,
                 backgroundColor: 'transparent',
                 yAxisID: "y1",
                 tension: 0.4,
@@ -891,7 +971,7 @@
             datasets.push({
                 label: "Daily Rain Total (in) - " + year,
                 data: rainData,
-                backgroundColor: randomColor(),
+                backgroundColor: colorRain,
                 yAxisID: "y2",
                 type: 'bar',
                 order: 5,
@@ -899,14 +979,18 @@
             });
         });
 
+        // Add Sunspots series using the same per–year base colors
         selectedYears.forEach(year => {
             const sunspotData = querySunspotsDataByYearAndMonths(year, selectedMonths);
             const sunspotsAligned = commonLabels.map(label => sunspotData[label] !== undefined ? sunspotData[label] : null);
+            // Use a light variant for sunspots (e.g., even lighter than Avg Temp)
+            let baseColor = yearColorMapping[year] || randomColor();
+            let colorSunspot = lightenColor(baseColor, 0.8);
             datasets.push({
                 label: "Sunspots Daily Total - " + year,
                 data: sunspotsAligned,
-                borderColor: "purple",
-                backgroundColor: "transparent",
+                borderColor: colorSunspot,
+                backgroundColor: 'transparent',
                 yAxisID: "y3",
                 type: "line",
                 tension: 0.4,
@@ -954,7 +1038,6 @@
         }
 
         if (dailyChart) dailyChart.destroy();
-
         const ctx = document.getElementById('dailyChart').getContext('2d');
         dailyChart = new Chart(ctx, {
             type: 'line',
@@ -1028,9 +1111,91 @@
                 }
             }
         });
-
         generateCustomLegend(dailyChart);
     }
+
+    // --- NEW: Apply Nearest Neighbor Mode ---
+    function applyNearestNeighborMode() {
+        if (!db) return;
+        const thresholdInput = document.getElementById("nnThreshold");
+        const threshold = parseFloat(thresholdInput.value) || 10.0;
+        const currentYear = String(new Date().getFullYear());
+        // Query the current year's latest record (assumes dates are in YYYY-MM-DD format)
+        const currentYearQuery = `SELECT date, gdd
+                                  FROM readings
+                                  WHERE substr(date, 1, 4) = '${currentYear}'
+                                  ORDER BY date DESC
+                                  LIMIT 1;`;
+        const stmt = db.prepare(currentYearQuery);
+        let currentRecord = null;
+        if (stmt.step()) {
+            currentRecord = stmt.getAsObject();
+        }
+        stmt.free();
+        if (!currentRecord) {
+            console.log("No data for current year");
+            return;
+        }
+        const currentGDD = parseFloat(currentRecord.gdd);
+        const dayKey = currentRecord.date.substring(5, 10); // MM-DD
+        // Query all years for the same day (grouping to get one record per year)
+        const nnQuery = `SELECT substr(date, 1, 4) as year, MAX(gdd) as gdd
+                         FROM readings
+                         WHERE substr(date, 6, 5) = '${dayKey}'
+                         GROUP BY year
+                         ORDER BY year ASC;`;
+        const results = db.exec(nnQuery);
+        let qualifyingYears = [];
+        if (results.length > 0) {
+            results[0].values.forEach(row => {
+                const year = row[0];
+                const yearGDD = parseFloat(row[1]);
+                if (Math.abs(yearGDD - currentGDD) <= threshold) {
+                    qualifyingYears.push(year);
+                }
+            });
+        }
+        // Update the year checkboxes in the right panel
+        const yearCheckboxes = document.querySelectorAll("input[name='year']");
+        yearCheckboxes.forEach(cb => {
+            if (qualifyingYears.includes(cb.value)) {
+                cb.checked = true;
+            } else {
+                cb.checked = false;
+            }
+        });
+        selectedYears = qualifyingYears;
+        loadAndPlotData();
+    }
+
+    // --- NEW: Nearest Neighbor Mode Control Event Listeners ---
+    document.getElementById("modeSelect").addEventListener("change", function () {
+        const mode = this.value;
+        if (mode === 'nearest') {
+            document.getElementById("thresholdContainer").style.display = "inline";
+            // Disable manual year checkbox changes in Nearest Neighbor mode
+            document.querySelectorAll("input[name='year']").forEach(cb => {
+                cb.disabled = true;
+            });
+            const allYearsCb = document.getElementById("allYears");
+            if (allYearsCb) allYearsCb.disabled = true;
+            applyNearestNeighborMode();
+        } else {
+            document.getElementById("thresholdContainer").style.display = "none";
+            // Enable manual year checkbox changes in Normal mode
+            document.querySelectorAll("input[name='year']").forEach(cb => {
+                cb.disabled = false;
+            });
+            const allYearsCb = document.getElementById("allYears");
+            if (allYearsCb) allYearsCb.disabled = false;
+            loadAndPlotData();
+        }
+    });
+    document.getElementById("nnThreshold").addEventListener("change", function () {
+        if (document.getElementById("modeSelect").value === "nearest") {
+            applyNearestNeighborMode();
+        }
+    });
 
     // --- NEW: Add tooltip on hover for vertical lines ---
     const tooltipEl = document.getElementById("vlineTooltip");
@@ -1085,7 +1250,7 @@
         if (dailyChart) dailyChart.resize();
     });
 
-    window.onload = loadAndPlotData;
+    window.onload = refreshData;
 </script>
 </body>
 </html>

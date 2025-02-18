@@ -390,6 +390,16 @@
         }
     }
 
+    // --- Global helper: getLegendCategory ---
+    function getLegendCategory(label) {
+        if (label.includes("Min Temp") || label.includes("Max Temp")) return "Min/Max Temp";
+        if (label.includes("Avg Temp")) return "Avg Temperature";
+        if (label.includes("Cumulative GDD")) return "Cumulative GDD";
+        if (label.includes("Daily Rain Total")) return "Daily Rain Totals";
+        if (label.includes("Sunspots Daily Total")) return "Sunspot Daily Total";
+        return "Grape Varietal";
+    }
+
     // --- Initialize sql.js and load the database ---
     initSqlJs({
         locateFile: file => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.12.0/${file}`
@@ -554,7 +564,7 @@
     }
 
     // --- Compute Bud Break Points Grouped by Variety (Scatter Points) ---
-    function computeBudBreakPoints(selectedYears, commonLabels, yearlyData) {
+    function computeBudBreakPoints(selectedYearsArr, commonLabels, yearlyData) {
         const result = db.exec("SELECT variety, heat_summation FROM grapevine_gdd ORDER BY variety");
         if (result.length === 0) return [];
         const grapeData = result[0].values;
@@ -563,7 +573,7 @@
             const variety = row[0];
             budBreakByVariety[variety] = [];
         });
-        selectedYears.forEach(year => {
+        selectedYearsArr.forEach(year => {
             const dataForYear = yearlyData[year];
             grapeData.forEach(row => {
                 const variety = row[0];
@@ -668,15 +678,6 @@
         legendContainer.innerHTML = '';
         const grapeVarietalContainer = document.getElementById('grapeVarietalLegend');
         if (grapeVarietalContainer) grapeVarietalContainer.innerHTML = '';
-
-        function getLegendCategory(label) {
-            if (label.includes("Min Temp") || label.includes("Max Temp")) return "Min/Max Temp";
-            if (label.includes("Avg Temp")) return "Avg Temperature";
-            if (label.includes("Cumulative GDD")) return "Cumulative GDD";
-            if (label.includes("Daily Rain Total")) return "Daily Rain Totals";
-            if (label.includes("Sunspots Daily Total")) return "Sunspot Daily Total";
-            return "Grape Varietal";
-        }
 
         const groups = {};
         chart.data.datasets.forEach((ds, index) => {
@@ -798,7 +799,8 @@
     function loadAndPlotData() {
         if (!db) return;
         const yearCheckboxes = document.querySelectorAll("input[name='year']:checked");
-        const selectedYears = Array.from(yearCheckboxes).map(cb => cb.value);
+        // Update global selectedYears (do not shadow)
+        selectedYears = Array.from(yearCheckboxes).map(cb => cb.value);
         const monthCheckboxes = document.querySelectorAll("input[name='month']:checked");
         const selectedMonths = Array.from(monthCheckboxes).map(cb => parseInt(cb.value));
         if (selectedYears.length === 0 || selectedMonths.length === 0) return;
@@ -917,6 +919,15 @@
 
         const budBreakDatasets = computeBudBreakPoints(selectedYears, commonLabels, yearlyData);
         datasets = datasets.concat(budBreakDatasets);
+
+        // --- Apply saved legend group states to datasets ---
+        const legendGroupStates = getLegendGroupStates();
+        datasets.forEach(ds => {
+            const category = getLegendCategory(ds.label);
+            if (category !== "Grape Varietal" && legendGroupStates.hasOwnProperty(category) && !legendGroupStates[category]) {
+                ds.hidden = true;
+            }
+        });
 
         // --- NEW: Build Vertical Lines Configuration for Predicted Bud Break ---
         let verticalLines = [];

@@ -1,0 +1,150 @@
+sequence_id,common_name,scientific_name,dormant,stage,gdd_min,gdd_max
+1,American plum borer,Euzophera semifuneralis,0,A,245,440
+2,Aphids,Leaf and twig forms,1,E,7,120
+3,Aphids,Leaf and twig forms,0,"N,A",100,200
+4,Aphids,Leaf and twig forms,0,"N,A",100,250
+5,Aphids,Leaf and twig forms,0,"N,A",250,2800
+6,Arborvitae leafminers,Argyresthia spp.,0,A,533,700
+7,Arborvitae leafminers,Argyresthia spp.,0,L,150,260
+8,Arborvitae leafminers,Argyresthia spp.,0,L,1800,2200
+9,Arborvitae leafminers,Argyresthia spp.,0,L,1700,2100
+10,Azalea leafminer,Caloptilia azaleela,0,L,450,800
+11,Azalea leafminer,Caloptilia azaleela,0,L,1260,1500
+12,Azalea whitefly,Pealius azaleae,0,"N,A",448,700
+13,Azalea whitefly,Pealius azaleae,0,"N,A",1250,1500
+14,Azalea whitefly,Pealius azaleae,0,"N,A",2032,2150
+15,Bagworm,Thyridopteryx ephemeraeformis,0,L,600,900
+16,Balsam gall midge,Paradiplosis tumifex,0,L,120,299
+17,Balsam twig aphid,Mindarus abietinus,0,N,30,100
+18,Birch leafminer,Fenusa pusilla,0,L,190,290
+19,Birch leafminer,Fenusa pusilla,0,L,530,700
+20,Black Vine Weevil,Otiorhynchus sulcatus,0,A,148,400
+21,Boxwood leafminer,Monarthropalpus buxi,0,A,350,600
+22,Boxwood leafminer,Monarthropalpus buxi,0,L,1200,2400
+23,Boxwood mite,Eurytetranychus buxi,0,"N,A",245,600
+24,Boxwood psyllid,Psylla buxi,0,N,290,440
+25,Bronze birch borer,Agrilus anxius,0,A,440,800
+26,Cankerworms (inch worms),,0,L,148,290
+27,Cooley spruce gall adelgid,Adelges cooleyi  on Douglas Fir,0,"N,A",1500,1775
+28,Cooley spruce gall adelgid,Adelges cooleyi - on Spruce,0,"N,A",120,190
+29,Cooley spruce gall adelgid,Adelges cooleyi - on Spruce,0,"N,A",1850,1950
+30,Cooley spruce gall adelgid,Adelges cooleyi - on Spruce,0,"N,A",22,81
+31,Cottony maple scale,Pulvinaria innumerabilis,1,C,802,1265
+32,Cottony maple leaf scale,Pulvinaria acericola,1,C,802,1265
+33,Cottony taxus scale,Pulvinaria floccifera,0,C,802,1388
+34,Cottony taxus scale,Pulvinaria floccifera,1,N,7,91
+35,Dogwood borer,Synanthedon scitula,0,A,148,700
+36,Eastern spruce gall adelgid,Adelges abietis,0,N,22,170
+37,Eastern tent caterpillar,Malacosma americanum,0,L,90,190
+38,Elongate hemlock scale,Fiorinia externa,0,C,360,700
+39,Elongate hemlock scale,Fiorinia externa,1,A,7,120
+40,Euonymus scale,Unaspis euonymi,0,C,533,820
+41,Euonymus scale,Unaspis euonymi,0,C,1150,1388
+42,Euonymus scale,Unaspis euonymi,1,N,35,120
+43,European fruit lecanium,Parthenolecanium corni,0,C,1266,1645
+44,European fruit lecanium,Parthenolecanium corni,1,N,35,145
+45,European Pine Sawfly,Neodiprion sertifer,0,L,78,220
+46,European pine shoot moth,Rhyacionia buoliana,0,L,34,121
+47,European pine shoot moth,Rhyacionia buoliana,0,L,480,710
+48,European red mite,Panonychus ulmi,0,"E,L,N",240,810
+49,European red mite,Panonychus ulmi,1,E,7,58
+50,Fall webworm,Hyphantria cunea,0,L,1266,1795
+51,Fletcher scale,Parthenolecanium fletcheri,0,C,1029,1388
+52,Fletcher scale,Parthenolecanium fletcheri,0,C,2515,2800
+53,Fletcher scale,Parthenolecanium fletcheri,0,N,38,148
+54,Fruitree leafroller,Archips argyrospilus,0,L,300,618
+55,Gypsy moth,Lymantria dispar,0,L,90,448
+56,Hemlock eriophyid (rust) mite,Nalepella tsugifolia,1,"N,A",7,450
+57,Hemlock scale,Abgrallaspis ithacae,0,C,1388,2154
+58,Hemlock scale,Abgrallaspis ithacae,1,N,35,121
+59,Hickory leaf stem gall phylloxera,Phylloxera carvaecaulis,0,N,91,246
+60,Holly leafminer,Phytomyza ilicis,0,"L,A",246,448
+61,Holly leafminer,Phytomyza ilicis,0,L,192,290
+62,Honeylocust spider mite,Eotetranychus multidigituli,0,"E,L,N,A",912,1514
+63,Honeylocust plant bug,Diaphnocoris chlorionis,0,"N,A",58,246
+64,Honeylocust pod gall midge,Dasineura gleditschiae,0,L,192,229
+65,Honeylocust spider mite,Platytetranychus multidigituli,0,"N,A",912,1514
+66,Japanese beetle,Popillia japonica,0,A,1029,2154
+67,Juniper scale,Carulaspis juniperi,0,C,707,1260
+68,Juniper scale,Carulaspis juniperi,1,N,22,148
+69,Juniper webworm,Dichomeris marginella,0,L,1645,1917
+70,Lace bugs,Corythuca spp,0,"N,A",239,363
+71,Lace bugs,Stephanitis spp.,0,"N,A",1266,1544
+72,Lace bugs,Stephanitis spp.,0,"N,A",120,2000
+73,Leafhoppers,Several species,0,"N,A",618,802
+74,Leafhoppers,Several species,0,"N,A",1266,1514
+75,Leafhoppers,Several species,0,"N,A",1917,2155
+76,Lilac borer,Podosesia syringae,0,A,200,299
+77,Lilac borer,Podosesia syringae,0,A,400,2000
+78,Locust borer,Magacyllene robiniae,0,"L,A",2271,2805
+79,Magnolia scale,Neolecanium cornuparvum,1,N,7,35
+80,Mountain ash sawfly,Pristiphora geniculata,0,L,448,707
+81,Nantucket pine tip moth,Rhyacionia frustrana,0,L,121,448
+82,Nantucket pine tip moth,Rhyacionia frustrana,0,L,1514,1917
+83,Native holly leafminer,Phytomyza iliciola,0,L,192,298
+84,Native holly leafminer,Phytomyza iliciola,0,L,1029,1266
+85,Oak blotch leafminers,"Cameraria spp., Tischeria spp.",0,L,533,912
+86,Oak leaftier,Croesia semipurpurana,0,L,7,35
+87,Oak skeletonizer,Bucculatrix ainsliella,0,L,448,707
+88,Oak skeletonizer,Bucculatrix ainsliella,0,L,1798,2155
+89,Oak spider mite,Oligonychus bicolor,0,"L,N",802,1266
+90,Oystershell scale,Lepidosaphes ulmi,0,C,363,707
+91,Oystershell scale,Lepidosaphes ulmi,1,E,7,91
+92,Peachtree borer,Synanthedon exitiosa,0,L,1500,1800
+93,Pine bark adelgid,Pineus strobi,0,C,58,618
+94,Pine bark adelgid,Pineus strobi,1,C,22,58
+95,Pine eriophyid mites,Eriophyidae,0,"N,A",298,533
+96,Pine needle miner,Exoteleia pinifoliella,0,"L,A",448,802
+97,Pine needle scale,Chionaspis pinifoliae,0,C,1290,1917
+98,Pine needle scale,Chionaspis pinifoliae,0,C,298,448
+99,Pine needle scale,Chionaspis pinifoliae,1,E,98,248
+100,Pine sawflies,"Diprion spp., Neodiprion spp.",0,L,246,1388
+101,Pine spittlebugs,Aphrophora cribrata,0,N,148,298
+102,Pine spittlebugs,A. saratogensis,0,N,148,298
+103,Pine webworm,Tetralopha robustella,0,L,802,2000
+104,Pitch twig moth,Petrova comstockiana,0,L,298,707
+105,Privet rust mite,Aculus ligustri,0,"L,N,A",1266,1515
+106,Privet rust mite,Aculus ligustri,0,"L,N,A",298,802
+107,Privet thrips,Dendrothrips ornatus,0,"L,A",192,618
+108,Privet thrips,Dendrothrips ornatus,0,"L,A",1029,1266
+109,Rhododendron borer,Synanthedon rhododendri,0,A,533,707
+110,Rhododendron borer,Synanthedon rhododendri,0,A,192,298
+111,Rhododendron gall midge,Clinodiplosis rhododendri,0,L,192,363
+112,Rhododendron stem borer,Oberea myops,0,A,298,802
+113,Rose chafer,Macrodactylus subspinosus,0,A,448,802
+114,Roundheaded apple tree borer,Saperda candida,0,A,802,1029
+115,Roundheaded apple tree borer,Saperda candida,0,A,1514,1798
+116,Rust mites,Eriophyidae,0,"L,N,A",1644,2033
+117,Rust mites,Eriophyidae,0,"L,N,A",533,802
+118,Southern red mite,Oligonychus ilicis,0,"N,A",246,363
+119,Southern red mite,Oligonychus ilicis,0,"N,A",618,802
+120,Southern red mite,Oligonychus ilicis,0,"N,A",2500,2700
+121,Southern red mite,Oligonychus ilicis,1,E,7,91
+122,Spruce needle miner,Endothenia albolineane,0,L,448,802
+123,Spruce spider mite,Oligonychus ununguis,1,E,7,121
+124,Spruce spider mite,Oligonychus ununguis,0,"N,A",192,363
+125,Spruce spider mite,Oligonychus ununguis,0,"N,A",2375,2806
+126,Taxus bud mite,Cedidophyopsis psilaspis,0,"N,A",148,448
+127,Taxus bud mite,Cedidophyopsis psilaspis,0,"N,A",707,912
+128,Taxus mealybug,Dysmicoccus wistariae,0,N,246,618
+129,Taxus mealybug,Dysmicoccus wistariae,1,N,7,91
+130,Tuliptree aphid,Macrosiphum liriodendri,0,"N,A",1151,1514
+131,Tuliptree aphid,Macrosiphum liriodendri,0,"N,A",1917,2033
+132,Tuliptree scale,Toumeyella liriodendri,0,C,2032,2629
+133,Tuliptree scale,Toumeyella liriodendri,1,N,12,121
+134,Tussock moth,Orgyia leucostigma,0,L,192,298
+135,Tussock moth,Orgyia leucostigma,0,L,2145,2516
+136,Twobanded Japanese weevil,Callirhopalus bifasciatus,0,A,1644,2271
+137,Twospotted spider mite,Tetranychus urticae,0,"N,A",363,618
+138,Twospotted spider mite,Tetranychus urticae,0,A,1300,2000
+139,White pine aphid,Cinara strobi,0,A,1917,2271
+140,White pine aphid,Cinara strobi,0,N,121,246
+141,White pine aphid,Cinara strobi,1,E,7,121
+142,White pine weevil,Pissodes strobi,0,A,7,58
+143,White prunicola scale,Pseudaulacaspis prinicola,0,C,707,1151
+144,White prunicola scale,Pseudaulacaspis prinicola,0,E,35,145
+145,Woolly beech aphids,Grylloprociphilus imbricator Phyllaphis fagi,0,"N,A",363,707
+146,Woolly beech aphids,Grylloprociphilus imbricator Phyllaphis fagi,0,"N,A",363,707
+147,Woolly elm aphid,Erisoma americanum,0,N,121,246
+148,Zimmerman pine moth,Dioryctria zimmermani,0,L,121,246
+149,Zimmerman pine moth,Dioryctria zimmermani,0,A,1917,2154

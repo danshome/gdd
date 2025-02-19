@@ -7,6 +7,8 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <!-- Chart.js Zoom Plugin from CDN -->
     <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.2.0/dist/chartjs-plugin-zoom.min.js"></script>
+    <!-- Chart.js Datalabels Plugin -->
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0"></script>
     <!-- sql.js from CDN -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.12.0/sql-wasm.js"></script>
     <style>
@@ -18,10 +20,12 @@
             padding: 0;
             overflow-x: hidden;
         }
+
         h1, h2, h3 {
             text-align: center;
             margin: 10px 0;
         }
+
         /* Toggle buttons for slide-out panels */
         #toggleLeftPanel, #toggleRightPanel {
             position: fixed;
@@ -34,17 +38,21 @@
             padding: 8px 12px;
             cursor: pointer;
         }
+
         #toggleLeftPanel {
             left: 0;
         }
+
         #toggleRightPanel {
             right: 0;
         }
+
         /* Auto Refresh Toggle Control */
         #autoRefreshControl {
             text-align: center;
             margin: 10px 0;
         }
+
         /* Flex container for panels and chart */
         .flex-container {
             display: flex;
@@ -54,6 +62,7 @@
             box-sizing: border-box;
             transition: margin 0.3s ease;
         }
+
         /* Left slide-out panel (months) */
         #leftPanel {
             width: fit-content;
@@ -63,11 +72,13 @@
             padding: 10px;
             text-align: left;
         }
+
         #leftPanel.hidden {
             width: 0;
             padding: 0;
             overflow: hidden;
         }
+
         /* Right slide-out panel (years) */
         #rightPanel {
             width: fit-content;
@@ -77,19 +88,22 @@
             padding: 10px;
             text-align: right;
         }
+
         #rightPanel.hidden {
             width: 0;
             padding: 0;
             overflow: hidden;
         }
+
         /* Chart container fills remaining space */
         #chartContainer {
-            position: relative; /* Allows absolute positioning inside */
+            position: relative;
             flex: 1;
             padding: 10px;
             box-sizing: border-box;
-            height: 80vh; /* 80% of viewport height */
+            height: 80vh;
         }
+
         /* Ensure the canvas fills its container */
         canvas {
             background: #fff;
@@ -99,11 +113,13 @@
             height: 100% !important;
             display: block;
         }
+
         /* Ensure the checkboxes are stacked */
         #monthControls label, #yearControls label {
             display: block;
             margin: 5px 0;
         }
+
         /* Custom legend container styling for the bottom legend */
         #legendContainer {
             display: flex;
@@ -114,6 +130,7 @@
             padding: 5px;
             box-sizing: border-box;
         }
+
         /* Updated legend item style for bottom legend (no button look) */
         #legendContainer .legend-item {
             display: inline-flex;
@@ -127,6 +144,7 @@
             border-radius: 0;
             cursor: pointer;
         }
+
         /* Tooltip for vertical line labels */
         #vlineTooltip {
             position: absolute;
@@ -140,6 +158,10 @@
             z-index: 2000;
         }
     </style>
+    <script>
+        // Register the ChartDataLabels plugin
+        Chart.register(ChartDataLabels);
+    </script>
 </head>
 <body>
 <h1>Robert Clay Vineyards</h1>
@@ -259,6 +281,7 @@
         afterDraw(chart, args, options) {
             const {ctx, chartArea: {left, right}, scales: {y}} = chart;
             if (!y) return;
+
             function drawLine(yValue, color, text) {
                 const yPixel = y.getPixelForValue(yValue);
                 ctx.save();
@@ -274,6 +297,7 @@
                 ctx.font = '12px Arial';
                 ctx.fillText(text, left + 5, yPixel - 5);
             }
+
             drawLine(32, 'green', 'Freeze (32°F)');
             drawLine(50, 'blue', 'Base Temp (50°F)');
             drawLine(86, 'red', 'Ceiling Temp (86°F)');
@@ -281,11 +305,10 @@
     };
     Chart.register(horizontalLinePlugin);
 
-    // --- NEW: Custom Plugin: verticalLinePlugin (draws only lines)
+    // Custom Plugin: verticalLinePlugin (draws only lines)
     const verticalLinePlugin = {
         id: 'verticalLinePlugin',
         afterDraw(chart, args, options) {
-            // Only draw vertical lines if current year is selected.
             const currentYear = String(new Date().getFullYear());
             if (!selectedYears || !selectedYears.includes(currentYear)) return;
             const ctx = chart.ctx;
@@ -311,25 +334,22 @@
     let dailyChart;
     let SQL;
     let selectedYears = []; // Global array for selected years
+    let yearColorMapping = {}; // Global persistent color mapping
 
-    // Global persistent color mapping (per year)
-    let yearColorMapping = {};
-
-    // --- Helper Functions for Logging ---
     function log(message) {
         const now = new Date().toISOString().replace("T", " ").replace("Z", "");
         console.log("[" + now + "] " + message);
     }
+
     function log_debug(message) {
         if (DEBUG) {
             log("[DEBUG] " + message);
         }
     }
-    // Global configuration (for demo)
+
     let DEBUG = true;
     let DB_FILENAME = "ambient_weather.sqlite";
 
-    // --- Save and Load Filter Settings from localStorage ---
     function saveFilterSettings() {
         const monthCheckboxes = document.querySelectorAll("input[name='month']");
         const selectedMonths = Array.from(monthCheckboxes)
@@ -342,6 +362,7 @@
             .map(cb => cb.value);
         localStorage.setItem("selectedYears", JSON.stringify(selYears));
     }
+
     function loadFilterSettings() {
         const storedMonths = localStorage.getItem("selectedMonths");
         if (storedMonths) {
@@ -365,7 +386,7 @@
         }
     }
 
-    // --- NEW: Compute a simple linear regression trend line for an array of numbers.
+    // Compute a simple linear regression trend line
     function computeTrendLine(data) {
         let x = [], y = [];
         for (let i = 0; i < data.length; i++) {
@@ -394,7 +415,6 @@
         return trend;
     }
 
-    // --- Auto-Refresh Control Functions ---
     function refreshData() {
         const modeSelect = document.getElementById("modeSelect");
         if (modeSelect && modeSelect.value === "nearest") {
@@ -403,12 +423,14 @@
             loadAndPlotData();
         }
     }
+
     function startAutoRefresh() {
         if (!refreshIntervalId) {
             refreshIntervalId = setInterval(refreshData, AUTO_REFRESH_PERIOD);
             log("Auto Refresh started (every " + (AUTO_REFRESH_PERIOD / 1000) + " seconds).");
         }
     }
+
     function stopAutoRefresh() {
         if (refreshIntervalId) {
             clearInterval(refreshIntervalId);
@@ -417,31 +439,29 @@
         }
     }
 
-    // --- Global helper: getLegendCategory ---
     function getLegendCategory(label) {
-        // Check for Trend first so that "Avg Temp Trend" is not grouped with "Avg Temp"
         if (label.includes("Trend")) return "Avg Temp Trend";
         if (label.includes("Min Temp") || label.includes("Max Temp")) return "Min/Max Temp";
         if (label.includes("Avg Temp")) return "Avg Temperature";
         if (label.includes("Cumulative GDD")) return "Cumulative GDD";
         if (label.includes("Daily Rain Total")) return "Daily Rain Totals";
         if (label.includes("Sunspots Daily Total")) return "Sunspot Daily Total";
+        if (label.includes("Pest")) return "Pest Spray";
         return "Grape Varietal";
     }
 
-    // --- Initialize sql.js and load the database ---
-    initSqlJs({
-        locateFile: file => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.12.0/${file}`
-    }).then(function (SQLLib) {
-        SQL = SQLLib;
-        return fetch(DB_FILENAME);
-    }).then(response => response.arrayBuffer())
+    // Initialize sql.js and load the database
+    initSqlJs({locateFile: file => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.12.0/${file}`})
+        .then(function (SQLLib) {
+            SQL = SQLLib;
+            return fetch(DB_FILENAME);
+        })
+        .then(response => response.arrayBuffer())
         .then(buffer => {
             db = new SQL.Database(new Uint8Array(buffer));
             log("Database loaded successfully.");
             populateYearControls();
             loadFilterSettings();
-            // Initially call refreshData so that if mode is 'nearest', the nearest neighbor logic runs.
             refreshData();
             startAutoRefresh();
             document.querySelectorAll("input[name='year']").forEach(cb => {
@@ -505,15 +525,12 @@
             });
         }).catch(err => console.error("Error initializing database:", err));
 
-    // --- Helper function: generate a distinct HSL color given an index and total count.
     function generateDistinctColor(index, total) {
         const hue = Math.floor((360 / total) * index);
-        // You can adjust the saturation (70%) and lightness (50%) as needed.
         return `hsl(${hue}, 70%, 50%)`;
     }
 
     function populateYearControls() {
-        // Load persistent mapping if it exists
         let storedMapping = sessionStorage.getItem("yearColorMapping");
         if (storedMapping) {
             yearColorMapping = JSON.parse(storedMapping);
@@ -523,7 +540,6 @@
         const res = db.exec("SELECT DISTINCT substr(date, 1, 4) as year FROM readings ORDER BY year ASC;");
         const yearControls = document.getElementById("yearControls");
         yearControls.innerHTML = "";
-        // Create the "All Years" checkbox first
         const allYearsLabel = document.createElement("label");
         allYearsLabel.innerHTML = `<input type="checkbox" id="allYears" checked> All Years`;
         yearControls.appendChild(allYearsLabel);
@@ -535,30 +551,28 @@
                 if (yearEvents.hasOwnProperty(year) && yearEvents[year].length > 0) {
                     labelText += " (" + yearEvents[year].join(", ") + ")";
                 }
-                // Assign a persistent distinct color if one does not exist yet.
                 if (!yearColorMapping[year]) {
                     yearColorMapping[year] = generateDistinctColor(index, totalYears);
                 }
                 sessionStorage.setItem("yearColorMapping", JSON.stringify(yearColorMapping));
                 const label = document.createElement("label");
                 label.innerHTML = `<input type="checkbox" name="year" value="${year}" checked>
-                           <span style="display:inline-block; width:12px; height:12px; background-color:${yearColorMapping[year]}; margin-right:5px;"></span>
-                           ${labelText}`;
+                     <span style="display:inline-block; width:12px; height:12px; background-color:${yearColorMapping[year]}; margin-right:5px;"></span>
+                     ${labelText}`;
                 yearControls.appendChild(label);
             });
         }
     }
 
-    // --- Query Data for a Specific Year and Selected Months ---
     function queryDataByYearAndMonths(year, months) {
         const monthList = months.map(m => m).join(",");
         const sqlQuery = `
             SELECT substr(date, 6, 5) AS day_key,
-                   MIN(tempf) AS minTempF,
-                   MAX(tempf) AS maxTempF,
-                   AVG(tempf) AS avgTempF,
-                   MAX(gdd) AS maxCumGDD,
-                   MAX(dailyrainin) AS rainTotal
+                   MIN(tempf)         AS minTempF,
+                   MAX(tempf)         AS maxTempF,
+                   AVG(tempf)         AS avgTempF,
+                   MAX(gdd)           AS maxCumGDD,
+                   MAX(dailyrainin)   AS rainTotal
             FROM readings
             WHERE substr(date, 1, 4) = '${year}'
               AND cast(substr(date, 6, 2) as integer) IN (${monthList})
@@ -574,12 +588,11 @@
         return results;
     }
 
-    // --- Query Sunspots Data for a Specific Year and Selected Months ---
     function querySunspotsDataByYearAndMonths(year, months) {
         const monthList = months.join(",");
         const sqlQuery = `
             SELECT substr(date, 6, 5) AS day_key,
-                   daily_total AS sunspotCount
+                   daily_total        AS sunspotCount
             FROM sunspots
             WHERE substr(date, 1, 4) = '${year}'
               AND cast(substr(date, 6, 2) as integer) IN (${monthList})
@@ -595,7 +608,6 @@
         return results;
     }
 
-    // --- Process Queried Data ---
     function processYearlyData(rows) {
         const data = {};
         rows.forEach(r => {
@@ -610,20 +622,18 @@
         return data;
     }
 
-    // --- Align Data to a Common X-axis ---
     function alignData(commonLabels, dataByDay, field) {
         return commonLabels.map(label => dataByDay[label] ? dataByDay[label][field] : null);
     }
 
-    // --- Compute Bud Break Points Grouped by Variety (Scatter Points) ---
+    // Compute Bud Break Points for grape varieties
     function computeBudBreakPoints(selectedYearsArr, commonLabels, yearlyData) {
         const result = db.exec("SELECT variety, heat_summation FROM grapevine_gdd ORDER BY variety");
         if (result.length === 0) return [];
         const grapeData = result[0].values;
         const budBreakByVariety = {};
         grapeData.forEach(row => {
-            const variety = row[0];
-            budBreakByVariety[variety] = [];
+            budBreakByVariety[row[0]] = [];
         });
         selectedYearsArr.forEach(year => {
             const dataForYear = yearlyData[year];
@@ -661,7 +671,73 @@
         return scatterDatasets;
     }
 
-    // --- Function to Get Color for Variety ---
+    // Compute Pest Spray Points – plot only the min_gdd, with extra details in the tooltip.
+    // Compute Pest Spray Points – plot only the min_gdd points for the current year
+    function computePestSprayPoints(selectedYearsArr, commonLabels, yearlyData) {
+        const currentYear = String(new Date().getFullYear());
+        // Only proceed if the current year is among the selected years.
+        if (!selectedYearsArr.includes(currentYear)) return [];
+
+        // Query updated table: common_name, scientific_name, stage, min_gdd, max_gdd, dormant
+        const result = db.exec("SELECT common_name, scientific_name, stage, min_gdd, max_gdd, dormant FROM vineyard_pests ORDER BY common_name, min_gdd");
+        if (!result || result.length === 0) return [];
+        const pestData = result[0].values;
+        const pestPointsMap = {};
+
+        // Only iterate for the current year.
+        pestData.forEach(row => {
+            const pest = row[0]; // common_name
+            const scientificName = row[1];
+            const stage = row[2];
+            const minThreshold = row[3]; // min_gdd
+            const maxThreshold = row[4]; // max_gdd
+            const dormant = row[5]; // dormant
+            const dataForYear = yearlyData[currentYear];
+            if (!dataForYear) return; // Skip if no data for current year.
+            let point = null;
+            for (let i = 0; i < commonLabels.length; i++) {
+                const dayKey = commonLabels[i];
+                const record = dataForYear[dayKey];
+                if (record && record.maxCumGDD >= minThreshold) {
+                    point = {
+                        x: dayKey,
+                        y: minThreshold, // plot at the min_gdd level
+                        year: currentYear,
+                        scientific_name: scientificName,
+                        stage: stage,
+                        max_gdd: maxThreshold,
+                        dormant: dormant
+                    };
+                    break;
+                }
+            }
+            if (point) {
+                if (!pestPointsMap[pest]) {
+                    pestPointsMap[pest] = [];
+                }
+                pestPointsMap[pest].push(point);
+            }
+        });
+
+        const pestDatasets = [];
+        Object.keys(pestPointsMap).forEach(pest => {
+            pestDatasets.push({
+                label: pest,
+                data: pestPointsMap[pest],
+                pointStyle: 'rect',
+                pointRadius: 6,
+                backgroundColor: getColorForVariety(pest),
+                borderColor: getColorForVariety(pest),
+                type: 'scatter',
+                showLine: false,
+                order: 8,
+                yAxisID: 'y1',
+                hideInLegend: true  // Do not show these in the legend.
+            });
+        });
+        return pestDatasets;
+    }
+
     function getColorForVariety(variety) {
         const grapeColors = {
             "Chardonnay": "rgb(255,140,0)",
@@ -694,7 +770,6 @@
         return fallbackColors[Math.floor(Math.random() * fallbackColors.length)];
     }
 
-    // --- Random Color Generator (optional) ---
     function randomColor() {
         const r = Math.floor(Math.random() * 156) + 100;
         const g = Math.floor(Math.random() * 156) + 100;
@@ -702,7 +777,6 @@
         return `rgb(${r},${g},${b})`;
     }
 
-    // --- Darken a given rgb color string by a given factor (0 to 1) ---
     function darkenColor(rgbStr, factor) {
         const result = /rgb\((\d+),\s*(\d+),\s*(\d+)\)/.exec(rgbStr);
         if (!result) {
@@ -714,7 +788,6 @@
         return `rgb(${r},${g},${b})`;
     }
 
-    // --- Lighten a given rgb color string by a given factor (0 to 1) ---
     function lightenColor(rgbStr, factor) {
         const result = /rgb\((\d+),\s*(\d+),\s*(\d+)\)/.exec(rgbStr);
         if (!result) return rgbStr;
@@ -727,16 +800,15 @@
         return `rgb(${r},${g},${b})`;
     }
 
-    // --- Functions to get and save legend group states in localStorage ---
     function getLegendGroupStates() {
         const stored = localStorage.getItem("legendGroupStates");
         return stored ? JSON.parse(stored) : {};
     }
+
     function saveLegendGroupStates(states) {
         localStorage.setItem("legendGroupStates", JSON.stringify(states));
     }
 
-    // --- Generate Custom Legend with Toggle on Click ---
     function generateCustomLegend(chart) {
         const legendContainer = document.getElementById('legendContainer');
         legendContainer.innerHTML = '';
@@ -744,6 +816,7 @@
         if (grapeVarietalContainer) grapeVarietalContainer.innerHTML = '';
         const groups = {};
         chart.data.datasets.forEach((ds, index) => {
+            // Skip datasets flagged to hide in legend
             if (ds.hideInLegend) return;
             const cat = getLegendCategory(ds.label);
             if (!groups[cat]) groups[cat] = [];
@@ -851,12 +924,10 @@
     function loadAndPlotData() {
         if (!db) return;
         const yearCheckboxes = document.querySelectorAll("input[name='year']:checked");
-        // Update global selectedYears (do not shadow)
         selectedYears = Array.from(yearCheckboxes).map(cb => cb.value);
         const monthCheckboxes = document.querySelectorAll("input[name='month']:checked");
         const selectedMonths = Array.from(monthCheckboxes).map(cb => parseInt(cb.value));
         if (selectedYears.length === 0 || selectedMonths.length === 0) return;
-        // Retrieve persistent year color mapping from sessionStorage (or initialize)
         let storedMapping = sessionStorage.getItem("yearColorMapping");
         if (storedMapping) {
             yearColorMapping = JSON.parse(storedMapping);
@@ -873,28 +944,23 @@
         });
         const commonLabels = Array.from(commonLabelsSet).sort();
         let datasets = [];
-        // Define the current year for highlighting
         const currentYearStr = String(new Date().getFullYear());
         selectedYears.forEach(year => {
             const dataForYear = yearlyData[year];
             const minTempData = alignData(commonLabels, dataForYear, "minTempF");
             const maxTempData = alignData(commonLabels, dataForYear, "maxTempF");
             const avgTempData = alignData(commonLabels, dataForYear, "avgTempF");
-            // NEW: Compute the trend line for Avg Temp
             const trendData = computeTrendLine(avgTempData);
             const gddData = alignData(commonLabels, dataForYear, "maxCumGDD");
             const rainData = alignData(commonLabels, dataForYear, "rainTotal");
-            // Get or assign a persistent base color for this year
             if (!yearColorMapping[year]) {
                 yearColorMapping[year] = randomColor();
             }
             let baseColor = yearColorMapping[year];
-            // Save updated mapping to sessionStorage so the color stays the same during the session
             sessionStorage.setItem("yearColorMapping", JSON.stringify(yearColorMapping));
-            // Compute variants of the base color
             let bandFillColor = baseColor.replace("rgb(", "rgba(").replace(")", ",0.3)");
-            let colorAvg = lightenColor(baseColor, 0.3);   // Avg Temp lighter than base
-            let colorRain = lightenColor(baseColor, 0.5);  // Rain Total even lighter
+            let colorAvg = lightenColor(baseColor, 0.3);
+            let colorRain = lightenColor(baseColor, 0.5);
             let indexMin = datasets.length;
             datasets.push({
                 label: `Min Temp (°F) - ${year}`,
@@ -927,7 +993,6 @@
                 pairIndices: [indexMin, indexMax],
                 spanGaps: false
             });
-            // NEW: Insert the Avg Temp Trend dataset (order 3)
             datasets.push({
                 label: `Avg Temp Trend - ${year}`,
                 data: trendData,
@@ -943,7 +1008,6 @@
                 order: 3,
                 spanGaps: false
             });
-            // Adjust original Avg Temp dataset to order 4
             datasets.push({
                 label: `Avg Temp (°F) - ${year}`,
                 data: avgTempData,
@@ -983,11 +1047,10 @@
                 spanGaps: false
             });
         });
-        // Add Sunspots series using the same per–year base colors
+        // Add Sunspots series
         selectedYears.forEach(year => {
             const sunspotData = querySunspotsDataByYearAndMonths(year, selectedMonths);
             const sunspotsAligned = commonLabels.map(label => sunspotData[label] !== undefined ? sunspotData[label] : null);
-            // Use a light variant for sunspots (e.g., even lighter than Avg Temp)
             let baseColor = yearColorMapping[year] || randomColor();
             let colorSunspot = lightenColor(baseColor, 0.8);
             datasets.push({
@@ -1004,9 +1067,12 @@
                 spanGaps: false
             });
         });
+        // Add Pest Spray Points (for vineyard pests) – these won't appear in the legend.
+        const pestDatasets = computePestSprayPoints(selectedYears, commonLabels, yearlyData);
+        datasets = datasets.concat(pestDatasets);
+        // Add Bud Break datasets for grape varieties
         const budBreakDatasets = computeBudBreakPoints(selectedYears, commonLabels, yearlyData);
         datasets = datasets.concat(budBreakDatasets);
-        // --- Apply saved legend group states to datasets ---
         const legendGroupStates = getLegendGroupStates();
         datasets.forEach(ds => {
             const category = getLegendCategory(ds.label);
@@ -1014,7 +1080,6 @@
                 ds.hidden = true;
             }
         });
-        // --- NEW: Build Vertical Lines Configuration for Predicted Bud Break ---
         let verticalLines = [];
         const currentYear = String(new Date().getFullYear());
         if (selectedYears.includes(currentYear)) {
@@ -1024,7 +1089,6 @@
                     const variety = row[0];
                     const predicted = row[1];
                     if (predicted && predicted.startsWith(currentYear)) {
-                        // Extract "MM-DD" from "YYYY-MM-DD"
                         const xLabel = predicted.substring(5);
                         verticalLines.push({
                             xLabel: xLabel,
@@ -1041,61 +1105,67 @@
         const ctx = document.getElementById('dailyChart').getContext('2d');
         dailyChart = new Chart(ctx, {
             type: 'line',
-            data: {
-                labels: commonLabels,
-                datasets: datasets
-            },
+            data: {labels: commonLabels, datasets: datasets},
             options: {
                 responsive: true,
                 maintainAspectRatio: false,
                 plugins: {
                     title: {
                         display: true,
-                        text: "Daily Avg Temp (with Min/Max Band, Trend & Actual), Cumulative GDD, Daily Rain, Bud Break & Sunspots"
+                        text: "Daily Avg Temp (with Min/Max Band, Trend & Actual), Cumulative GDD, Daily Rain, Bud Break, & Pest Spray"
                     },
-                    legend: {
-                        display: false
-                    },
-                    // --- NEW: Add verticalLinePlugin configuration ---
-                    verticalLinePlugin: {
-                        lines: verticalLines
-                    },
+                    // Disable the built-in legend so it doesn't appear on top
+                    legend: {display: false},
+                    verticalLinePlugin: {lines: verticalLines},
                     zoom: {
                         zoom: {
-                            wheel: { enabled: true, speed: 0.1 },
-                            pinch: { enabled: true },
-                            drag: { enabled: false },
+                            wheel: {enabled: true, speed: 0.1},
+                            pinch: {enabled: true},
+                            drag: {enabled: false},
                             mode: 'x'
                         },
-                        pan: { enabled: true, mode: 'x' }
+                        pan: {enabled: true, mode: 'x'}
+                    },
+                    datalabels: {
+                        display: false // default; pest datasets override this via tooltip callbacks
+                    },
+                    tooltip: {
+                        mode: 'nearest',  // Only show the nearest point per pest
+                        intersect: true,
+                        callbacks: {
+                            // Customize tooltip for pest datasets to show extra details
+                            label: function (context) {
+                                if (context.dataset.hideInLegend) {
+                                    const point = context.raw;
+                                    return context.dataset.label + ": " +
+                                        "Scientific: " + point.scientific_name +
+                                        ", Stage: " + point.stage +
+                                        ", GDD: " + point.y + " (min), " + point.max_gdd + " (max)" +
+                                        ", Dormant: " + point.dormant;
+                                }
+                                return context.dataset.label + ": " + context.formattedValue;
+                            }
+                        }
                     }
                 },
                 scales: {
-                    x: {
-                        title: {
-                            display: true,
-                            text: "Month-Day"
-                        }
-                    },
-                    y: {
-                        position: "left",
-                        title: { display: true, text: "Temperature (°F)" }
-                    },
+                    x: {title: {display: true, text: "Month-Day"}},
+                    y: {position: "left", title: {display: true, text: "Temperature (°F)"}},
                     y1: {
                         position: "right",
-                        title: { display: true, text: "Cumulative GDD" },
-                        grid: { drawOnChartArea: false }
+                        title: {display: true, text: "Cumulative GDD"},
+                        grid: {drawOnChartArea: false}
                     },
                     y2: {
                         position: "right",
-                        title: { display: true, text: "Rain Total (in)" },
-                        grid: { drawOnChartArea: false },
+                        title: {display: true, text: "Rain Total (in)"},
+                        grid: {drawOnChartArea: false},
                         beginAtZero: true
                     },
                     y3: {
                         position: "right",
-                        title: { display: true, text: "Sunspots Daily Total" },
-                        grid: { drawOnChartArea: false },
+                        title: {display: true, text: "Sunspots Daily Total"},
+                        grid: {drawOnChartArea: false},
                         beginAtZero: true
                     }
                 }
@@ -1104,13 +1174,11 @@
         generateCustomLegend(dailyChart);
     }
 
-    // --- NEW: Apply Nearest Neighbor Mode ---
     function applyNearestNeighborMode() {
         if (!db) return;
         const thresholdInput = document.getElementById("nnThreshold");
         const threshold = parseFloat(thresholdInput.value) || 10.0;
         const currentYear = String(new Date().getFullYear());
-        // Query the current year's latest record (assumes dates are in YYYY-MM-DD format)
         const currentYearQuery = `SELECT date, gdd
                                   FROM readings
                                   WHERE substr(date, 1, 4) = '${currentYear}'
@@ -1127,8 +1195,7 @@
             return;
         }
         const currentGDD = parseFloat(currentRecord.gdd);
-        const dayKey = currentRecord.date.substring(5, 10); // MM-DD
-        // Query all years for the same day (grouping to get one record per year)
+        const dayKey = currentRecord.date.substring(5, 10);
         const nnQuery = `SELECT substr(date, 1, 4) as year, MAX(gdd) as gdd
                          FROM readings
                          WHERE substr(date, 6, 5) = '${dayKey}'
@@ -1145,25 +1212,18 @@
                 }
             });
         }
-        // Update the year checkboxes in the right panel
         const yearCheckboxes = document.querySelectorAll("input[name='year']");
         yearCheckboxes.forEach(cb => {
-            if (qualifyingYears.includes(cb.value)) {
-                cb.checked = true;
-            } else {
-                cb.checked = false;
-            }
+            cb.checked = qualifyingYears.includes(cb.value);
         });
         selectedYears = qualifyingYears;
         loadAndPlotData();
     }
 
-    // --- NEW: Nearest Neighbor Mode Control Event Listeners ---
     document.getElementById("modeSelect").addEventListener("change", function () {
         const mode = this.value;
         if (mode === 'nearest') {
             document.getElementById("thresholdContainer").style.display = "inline";
-            // Disable manual year checkbox changes in Nearest Neighbor mode
             document.querySelectorAll("input[name='year']").forEach(cb => {
                 cb.disabled = true;
             });
@@ -1172,7 +1232,6 @@
             applyNearestNeighborMode();
         } else {
             document.getElementById("thresholdContainer").style.display = "none";
-            // Enable manual year checkbox changes in Normal mode
             document.querySelectorAll("input[name='year']").forEach(cb => {
                 cb.disabled = false;
             });
@@ -1187,14 +1246,13 @@
         }
     });
 
-    // --- NEW: Add tooltip on hover for vertical lines ---
     const tooltipEl = document.getElementById("vlineTooltip");
     document.getElementById("dailyChart").addEventListener("mousemove", function (event) {
         if (!dailyChart) return;
         const canvasPosition = this.getBoundingClientRect();
         const xPos = event.clientX - canvasPosition.left;
         const xScale = dailyChart.scales.x;
-        const tolerance = 5; // pixels
+        const tolerance = 5;
         let found = false;
         if (dailyChart.options.plugins.verticalLinePlugin && dailyChart.options.plugins.verticalLinePlugin.lines) {
             dailyChart.options.plugins.verticalLinePlugin.lines.forEach(line => {
@@ -1208,10 +1266,11 @@
                 }
             });
         }
-        if (!found) { tooltipEl.style.display = "none"; }
+        if (!found) {
+            tooltipEl.style.display = "none";
+        }
     });
 
-    // --- NEW: Export Chart to PNG functionality ---
     document.getElementById("exportButton").addEventListener("click", function () {
         if (!dailyChart) {
             alert("Chart is not loaded yet.");
@@ -1223,7 +1282,6 @@
         link.click();
     });
 
-    // --- Slide-Out Panel Toggle Logic ---
     document.getElementById("toggleLeftPanel").addEventListener("click", function () {
         const leftPanel = document.getElementById("leftPanel");
         leftPanel.classList.toggle("hidden");

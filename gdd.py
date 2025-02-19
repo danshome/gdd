@@ -614,7 +614,7 @@ def fetch_openmeteo_forecast():
         "precipitation_unit": "inch",
         "timezone": "America/Chicago",
         "models": "ecmwf_aifs025",
-        "forecast_days": 15
+        "forecast_days": 14
     }
     log(f"Fetching hourly forecast data from Open-Meteo with params: {params}")
     responses = openmeteo.weather_api(url, params=params)

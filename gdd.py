@@ -186,6 +186,9 @@ except Exception as e:
 # Create indexes.
 execute_sql("CREATE INDEX IF NOT EXISTS idx_readings_day ON readings (substr(date, 1, 10));")
 execute_sql("CREATE INDEX IF NOT EXISTS idx_gdd ON readings (gdd);")
+execute_sql("CREATE INDEX IF NOT EXISTS idx_readings_year ON readings((substr(date, 1, 4)));")
+execute_sql("CREATE INDEX IF NOT EXISTS idx_readings_month ON readings((cast(substr(date, 6, 2) as integer)));")
+
 conn.commit()
 
 # === Import CSV Data into grapevine_gdd Table ===
@@ -229,6 +232,46 @@ try:
 except Exception as e:
     log(f"Error processing {GRAPEVINE_CSV}: {e}")
 
+# --- Create the vineyard_pests table ---
+try:
+    execute_sql("""
+    CREATE TABLE IF NOT EXISTS vineyard_pests (
+        pest TEXT PRIMARY KEY,
+        heat_summation INTEGER
+    );
+    """)
+    conn.commit()
+except Exception as e:
+    log(f"Error creating 'vineyard_pests' table: {e}")
+    sys.exit(1)
+
+# --- Create an index on the heat_summation column for faster queries if needed ---
+execute_sql("CREATE INDEX IF NOT EXISTS idx_vineyard_pests_heat ON vineyard_pests(heat_summation);")
+conn.commit()
+
+# --- Populate the vineyard_pests table with sample data ---
+# These sample values are in degree days (GDD base 10°C).
+# They represent the approximate heat summation when each pest reaches the critical stage for pesticide application.
+pest_data = [
+    ("Grape leafhopper", 170),
+    ("Two-spotted spider mite", 220),
+    ("Vine mealybug", 210),
+    ("Scale insect", 230),
+    ("Grape thrips", 180),
+    ("Grape berry moth", 200)
+]
+
+for pest, heat in pest_data:
+    try:
+        execute_sql("""
+            INSERT OR REPLACE INTO vineyard_pests (pest, heat_summation)
+            VALUES (?, ?)
+        """, (pest, heat))
+    except Exception as e:
+        log(f"Error inserting pest data for {pest}: {e}")
+conn.commit()
+log("Vineyard pests table populated.")
+
 # === Import SunSpot Count Data from CSV ===
 try:
     execute_sql("""
@@ -245,6 +288,11 @@ try:
         PRIMARY KEY (year, month, day)
     );
     """)
+    conn.commit()
+
+    execute_sql("CREATE INDEX IF NOT EXISTS idx_sunspots_date ON sunspots(date);")
+    execute_sql("CREATE INDEX IF NOT EXISTS idx_sunspots_year ON sunspots((substr(date, 1, 4)));")
+    execute_sql("CREATE INDEX IF NOT EXISTS idx_sunspots_month ON sunspots((cast(substr(date, 6, 2) as integer)));")
     conn.commit()
 except Exception as e:
     log(f"Error creating 'sunspots' table: {e}")

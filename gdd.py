@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 CONFIG_FILE = "config.ini"
 GRAPEVINE_CSV = "grapevine_gdd.csv"
 SUNSPOT_CSV = "SN_d_tot_V2.0.csv"
+VINEYARD_PESTS_CSV = "vineyard_pests.csv"
 
 # --- Helper Functions for Logging ---
 def log(message: str) -> None:
@@ -233,11 +234,22 @@ except Exception as e:
     log(f"Error processing {GRAPEVINE_CSV}: {e}")
 
 # --- Create the vineyard_pests table ---
+import pandas as pd
+
+# Load the corrected pest data from the Excel file
+df_pests = pd.read_csv(VINEYARD_PESTS_CSV)
+
+# Ensure the database schema is properly structured
 try:
     execute_sql("""
     CREATE TABLE IF NOT EXISTS vineyard_pests (
-        pest TEXT PRIMARY KEY,
-        heat_summation INTEGER
+        sequence_id INTEGER PRIMARY KEY,
+        common_name TEXT,
+        scientific_name TEXT,
+        dormant INTEGER CHECK (dormant IN (0,1)),
+        stage TEXT,
+        min_gdd INTEGER,
+        max_gdd INTEGER
     );
     """)
     conn.commit()
@@ -245,32 +257,31 @@ except Exception as e:
     log(f"Error creating 'vineyard_pests' table: {e}")
     sys.exit(1)
 
-# --- Create an index on the heat_summation column for faster queries if needed ---
-execute_sql("CREATE INDEX IF NOT EXISTS idx_vineyard_pests_heat ON vineyard_pests(heat_summation);")
+# Optionally, create an index on gdd columns for faster queries
+execute_sql("CREATE INDEX IF NOT EXISTS idx_vineyard_pests_gdd ON vineyard_pests(min_gdd, max_gdd);")
 conn.commit()
 
-# --- Populate the vineyard_pests table with sample data ---
-# These sample values are in degree days (GDD base 10°C).
-# They represent the approximate heat summation when each pest reaches the critical stage for pesticide application.
-pest_data = [
-    ("Grape leafhopper", 170),
-    ("Two-spotted spider mite", 220),
-    ("Vine mealybug", 210),
-    ("Scale insect", 230),
-    ("Grape thrips", 180),
-    ("Grape berry moth", 200)
-]
-
-for pest, heat in pest_data:
+# Insert or replace (so if sequence_id already exists, it overwrites the row)
+for index, row in df_pests.iterrows():
     try:
         execute_sql("""
-            INSERT OR REPLACE INTO vineyard_pests (pest, heat_summation)
-            VALUES (?, ?)
-        """, (pest, heat))
+            INSERT OR REPLACE INTO vineyard_pests
+            (sequence_id, common_name, scientific_name, dormant, stage, min_gdd, max_gdd)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            row['sequence_id'],
+            row['common_name'],
+            row['scientific_name'],
+            row['dormant'],
+            row['stage'],
+            row['gdd_min'],
+            row['gdd_max']
+        ))
     except Exception as e:
-        log(f"Error inserting pest data for {pest}: {e}")
+        log(f"Error inserting pest data for {row['common_name']} (Row: {index}): {e}")
+
 conn.commit()
-log("Vineyard pests table populated.")
+log("Vineyard pests table updated from CSV.")
 
 # === Import SunSpot Count Data from CSV ===
 try:

@@ -37,8 +37,12 @@ jobs:
           dvc remote modify myremote url "gdrive://${{ secrets.GDRIVE_FOLDER_ID }}"
           dvc remote modify myremote gdrive_client_id "${{ secrets.GDRIVE_CLIENT_ID }}"
           dvc remote modify myremote gdrive_client_secret "${{ secrets.GDRIVE_CLIENT_SECRET }}"
+# Step 5: Pull the SQLite database via DVC.
+      - name: Configure DVC Remote with Service Account Credentials
+        run: |
+          echo "${{ secrets.GDRIVE_SERVICE_ACCOUNT }}" | base64 --decode > service_account.json
+          dvc remote modify myremote gdrive_service_account_file service_account.json
 
-      # Step 5: Pull the SQLite database via DVC.
       - name: DVC Pull Data
         run: dvc pull
 

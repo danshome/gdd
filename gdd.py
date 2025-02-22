@@ -1,36 +1,119 @@
+#!/usr/bin/env python3
+"""
+GDD Calculation and Data Ingestion Script
+
+This module performs the following:
+  - Reads configuration from config.ini.
+  - Establishes a connection to a SQLite database.
+  - Creates required tables (readings, grapevine_gdd, vineyard_pests, sunspots).
+  - Imports data from CSV files (grapevine, vineyard pests, sunspots).
+  - Fetches weather data from Ambient Weather API and Open-Meteo as fallback.
+  - Recalculates cumulative Growing Degree Days (GDD) both incrementally and fully.
+  - Fills in missing readings via linear interpolation.
+  - Appends forecast data.
+  - Projects bud break dates for grape varieties using historical regression.
+
+All functions are documented, and complex sections include inline comments for clarity.
+"""
+
 import configparser
 import os
 import sqlite3
 import sys
 import time
-from io import StringIO
 import requests
 import csv
+from io import StringIO
 from datetime import datetime, timedelta, timezone
+import pandas as pd
 
-# --- Constants for File Names ---
+# --- Constants ---
 CONFIG_FILE = "config.ini"
 GRAPEVINE_CSV = "grapevine_gdd.csv"
 SUNSPOT_CSV = "SN_d_tot_V2.0.csv"
 VINEYARD_PESTS_CSV = "vineyard_pests.csv"
 
-# --- Helper Functions for Logging ---
+# Global variables (populated by reload_config)
+DB_FILENAME = None
+RETRY_SLEEP_TIME = None
+RATE_LIMIT_DELAY = None
+API_CALL_DELAY = None
+DEBUG = False
+RECALC_INTERVAL = None
+MAC_ADDRESS = None
+API_KEY = None
+APPLICATION_KEY = None
+BACKUP_MAC_ADDRESS = None
+URL_TEMPLATE = None
+START_DATE = None
+CURRENT_DATE = None
+OPENMETEO_LAT = None
+OPENMETEO_LON = None
+BUD_BREAK_START = None
+
+# Base temperatures for GDD calculations
+BASE_TEMP_C = 10  # °C threshold for 5-minute cumulative GDD
+BASE_TEMP_F = 50  # °F threshold for hourly/daily calculations
+
+# Order of fields when inserting into the readings table
+FIELDS_ORDER = [
+    "dateutc", "date", "tempf", "humidity", "baromrelin", "baromabsin", "feelsLike",
+    "dewPoint", "winddir", "windspeedmph", "windgustmph", "maxdailygust", "windgustdir",
+    "winddir_avg2m", "windspdmph_avg2m", "winddir_avg10m", "windspdmph_avg10m",
+    "hourlyrainin", "dailyrainin", "monthlyrainin", "yearlyrainin", "battin", "battout",
+    "tempinf", "humidityin", "feelsLikein", "dewPointin", "lastRain", "passkey", "time", "loc"
+]
+
+
+# --- Logging Functions ---
 def log(message: str) -> None:
+    """
+    Logs a message with the current UTC timestamp in the format
+    YYYY-MM-DD HH:MM:SS.mmm (milliseconds precision).
+
+    :param message: The message to log.
+    :type message: str
+    :return: None
+    """
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
     print(f"[{now}] {message}")
 
+
 def log_debug(message: str) -> None:
+    """
+    Logs a debug message if the debug mode is enabled.
+
+    This function appends a "[DEBUG]" prefix to the input message and logs it
+    only when the debug mode is active, as indicated by the `DEBUG` global
+    variable. The function does not return any value and silently performs
+    logging without raising exceptions or handling errors.
+
+    :param message: The debug message to be logged.
+    :type message: str
+    :return: None
+    """
     if DEBUG:
         log("[DEBUG] " + message)
 
-# === Function to Reload Configuration from config.ini ===
+
+# --- Configuration Reload ---
 def reload_config() -> None:
+    """
+    Reloads the configuration settings from a specified configuration file. The function retrieves
+    values from various sections of the configuration file, validating their existence and format.
+    It updates the global variables used throughout the application with these values. If the
+    configuration file is missing, unreadable, or contains invalid entries, the function logs
+    the corresponding errors and gracefully exits the program. Some settings have fallbacks
+    in case certain parameters are optional or missing.
+
+    :raises SystemExit: If the configuration file is missing or certain required values are invalid.
+    :raises ConfigParserError: If there is an error while reading the configuration file.
+    :raises ValueError: If certain date fields have invalid formats.
+    """
     global DB_FILENAME, RETRY_SLEEP_TIME, RATE_LIMIT_DELAY, API_CALL_DELAY, DEBUG, RECALC_INTERVAL
     global MAC_ADDRESS, API_KEY, APPLICATION_KEY, BACKUP_MAC_ADDRESS, URL_TEMPLATE, START_DATE, CURRENT_DATE
-    global OPENMETEO_LAT, OPENMETEO_LON, BUD_BREAK_START
-    global GRAPEVINE_CSV, SUNSPOT_CSV
+    global OPENMETEO_LAT, OPENMETEO_LON, BUD_BREAK_START, GRAPEVINE_CSV, SUNSPOT_CSV
 
-    # Check if config.ini exists
     if not os.path.exists(CONFIG_FILE):
         log(f"Error: {CONFIG_FILE} not found.")
         sys.exit(1)
@@ -48,7 +131,6 @@ def reload_config() -> None:
     except Exception as e:
         log(f"Missing 'db_filename' in [global]: {e}")
         sys.exit(1)
-    # Force DB_FILENAME to reside in a safe directory.
     safe_dir = config.get('global', 'db_directory', fallback=os.getcwd())
     DB_FILENAME = os.path.join(safe_dir, os.path.basename(raw_db_filename))
     try:
@@ -77,7 +159,7 @@ def reload_config() -> None:
         log(f"Error in backup configuration: {e}")
         sys.exit(1)
 
-    # API endpoint template for Ambient Weather
+    # API endpoint configuration
     try:
         URL_TEMPLATE = config.get('api', 'url_template')
     except Exception as e:
@@ -92,13 +174,12 @@ def reload_config() -> None:
         sys.exit(1)
     CURRENT_DATE = datetime.now(timezone.utc).date()
 
-    # Read bud_break_start from config or default to January 1 of the current year
     try:
         BUD_BREAK_START = datetime.strptime(config.get('date', 'bud_break_start'), "%Y-%m-%d").date()
     except Exception:
         BUD_BREAK_START = datetime(datetime.now(timezone.utc).year, 1, 1).date()
 
-    # Open-Meteo configuration (for fallback)
+    # Open-Meteo configuration (fallback)
     try:
         OPENMETEO_LAT = config.getfloat('openmeteo', 'latitude')
         OPENMETEO_LON = config.getfloat('openmeteo', 'longitude')
@@ -106,40 +187,76 @@ def reload_config() -> None:
         log(f"Error in Open-Meteo configuration: {e}")
         sys.exit(1)
 
-    # Optionally, move CSV filenames into config as well:
+    # Optional CSV file overrides
     GRAPEVINE_CSV = config.get('files', 'grapevine_csv', fallback=GRAPEVINE_CSV)
     SUNSPOT_CSV = config.get('files', 'sunspot_csv', fallback=SUNSPOT_CSV)
 
-# === Initial Config Load ===
-reload_config()
 
-# === Fields to Store (Order Matters) ===
-fields_order = [
-    "dateutc", "date", "tempf", "humidity", "baromrelin", "baromabsin", "feelsLike",
-    "dewPoint", "winddir", "windspeedmph", "windgustmph", "maxdailygust", "windgustdir",
-    "winddir_avg2m", "windspdmph_avg2m", "winddir_avg10m", "windspdmph_avg10m",
-    "hourlyrainin", "dailyrainin", "monthlyrainin", "yearlyrainin", "battin", "battout",
-    "tempinf", "humidityin", "feelsLikein", "dewPointin", "lastRain", "passkey", "time", "loc"
-]
+# --- Database Functions ---
+def get_db_connection() -> sqlite3.Connection:
+    """
+    Establishes a connection to the SQLite database and returns the connection object.
 
-# === Open SQLite Database and Create Tables ===
-try:
-    conn = sqlite3.connect(DB_FILENAME)
-    cursor = conn.cursor()
-except Exception as e:
-    log(f"Error connecting to database: {e}")
-    sys.exit(1)
+    This function attempts to connect to the SQLite database using the provided
+    database filename. It makes use of the sqlite3 library for the connection.
+    If an error occurs during the connection process, it logs the error message
+    and terminates the program. The successful establishment of the connection
+    returns a sqlite3.Connection object.
 
-def execute_sql(statement, params=()):
+    :raises Exception: If there is any error in the database connection process.
+    :return: A connection object representing the SQLite database connection.
+    :rtype: sqlite3.Connection
+    """
+    try:
+        conn = sqlite3.connect(DB_FILENAME)
+        return conn
+    except Exception as e:
+        log(f"Error connecting to database: {e}")
+        sys.exit(1)
+
+
+def execute_sql(cursor: sqlite3.Cursor, statement: str, params=()) -> None:
+    """
+    Executes a provided SQL statement with optional parameters using the given
+    SQLite cursor, handling errors and performing a rollback on failure.
+
+    This function ensures that SQL execution and error handling are managed
+    safely. If an error occurs during the execution of the SQL statement, the
+    error is logged, and the transaction is rolled back to prevent partial
+    executions from affecting the database's state.
+
+    :param cursor: SQLite database cursor for executing the SQL statement.
+    :type cursor: sqlite3.Cursor
+    :param statement: SQL statement to be executed.
+    :type statement: str
+    :param params: Optional parameters to be used with the SQL statement. Defaults to an
+        empty tuple.
+    :type params: tuple, optional
+    :return: None
+    """
     try:
         cursor.execute(statement, params)
     except sqlite3.Error as e:
         log(f"SQL error: {e} while executing: {statement} with params: {params}")
-        conn.rollback()
+        cursor.connection.rollback()
 
-# Create tables with exception handling.
-try:
-    execute_sql("""
+
+# --- Table Creation Functions ---
+def create_tables(conn: sqlite3.Connection, cursor: sqlite3.Cursor) -> None:
+    """
+    Creates and initializes the required database tables and indexes for storing data related to readings,
+    grapevine growing degree days (GDD), vineyard pests, and sunspots. This function ensures that tables
+    exist within the database and adds relevant indexes to optimize query performance.
+
+    :param conn: Connection object for interacting with the SQLite database
+    :type conn: sqlite3.Connection
+    :param cursor: Cursor object associated with the provided SQLite database connection
+    :type cursor: sqlite3.Cursor
+    :return: None
+    :rtype: None
+    """
+    # Create the readings table
+    execute_sql(cursor, """
     CREATE TABLE IF NOT EXISTS readings (
         dateutc INTEGER PRIMARY KEY,
         date TEXT,
@@ -180,68 +297,25 @@ try:
     );
     """)
     conn.commit()
-except Exception as e:
-    log(f"Error creating 'readings' table: {e}")
-    sys.exit(1)
+    # Create indexes for improved query performance
+    execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_readings_day ON readings (substr(date, 1, 10));")
+    execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_gdd ON readings (gdd);")
+    execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_readings_year ON readings((substr(date, 1, 4)));")
+    execute_sql(cursor,
+                "CREATE INDEX IF NOT EXISTS idx_readings_month ON readings((cast(substr(date, 6, 2) as integer)));")
+    conn.commit()
 
-# Create indexes.
-execute_sql("CREATE INDEX IF NOT EXISTS idx_readings_day ON readings (substr(date, 1, 10));")
-execute_sql("CREATE INDEX IF NOT EXISTS idx_gdd ON readings (gdd);")
-execute_sql("CREATE INDEX IF NOT EXISTS idx_readings_year ON readings((substr(date, 1, 4)));")
-execute_sql("CREATE INDEX IF NOT EXISTS idx_readings_month ON readings((cast(substr(date, 6, 2) as integer)));")
-
-conn.commit()
-
-# === Import CSV Data into grapevine_gdd Table ===
-try:
-    execute_sql("""
+    # Create the grapevine_gdd table
+    execute_sql(cursor, """
     CREATE TABLE IF NOT EXISTS grapevine_gdd (
         variety TEXT PRIMARY KEY,
         heat_summation INTEGER
     );
     """)
     conn.commit()
-except Exception as e:
-    log(f"Error creating 'grapevine_gdd' table: {e}")
-    sys.exit(1)
 
-# Instead of enforcing an exact header, we check required columns.
-required_headers = ['variety', 'heat_summation']
-try:
-    with open(GRAPEVINE_CSV, "r", newline='') as csvfile:
-        reader = csv.reader(csvfile)
-        header = next(reader)
-        try:
-            variety_idx = header.index("variety")
-            heat_idx = header.index("heat_summation")
-        except ValueError as ve:
-            log(f"Required column missing in {GRAPEVINE_CSV}: {ve}")
-            sys.exit(1)
-        for row in reader:
-            if len(row) <= max(variety_idx, heat_idx):
-                continue
-            variety = row[variety_idx]
-            try:
-                heat_summation = int(row[heat_idx])
-            except ValueError:
-                heat_summation = None
-            execute_sql("""
-                INSERT OR REPLACE INTO grapevine_gdd (variety, heat_summation)
-                VALUES (?, ?)
-            """, (variety, heat_summation))
-    conn.commit()
-except Exception as e:
-    log(f"Error processing {GRAPEVINE_CSV}: {e}")
-
-# --- Create the vineyard_pests table ---
-import pandas as pd
-
-# Load the corrected pest data from the Excel file
-df_pests = pd.read_csv(VINEYARD_PESTS_CSV)
-
-# Ensure the database schema is properly structured
-try:
-    execute_sql("""
+    # Create the vineyard_pests table
+    execute_sql(cursor, """
     CREATE TABLE IF NOT EXISTS vineyard_pests (
         sequence_id INTEGER PRIMARY KEY,
         common_name TEXT,
@@ -253,39 +327,11 @@ try:
     );
     """)
     conn.commit()
-except Exception as e:
-    log(f"Error creating 'vineyard_pests' table: {e}")
-    sys.exit(1)
+    execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_vineyard_pests_gdd ON vineyard_pests(min_gdd, max_gdd);")
+    conn.commit()
 
-# Optionally, create an index on gdd columns for faster queries
-execute_sql("CREATE INDEX IF NOT EXISTS idx_vineyard_pests_gdd ON vineyard_pests(min_gdd, max_gdd);")
-conn.commit()
-
-# Insert or replace (so if sequence_id already exists, it overwrites the row)
-for index, row in df_pests.iterrows():
-    try:
-        execute_sql("""
-            INSERT OR REPLACE INTO vineyard_pests
-            (sequence_id, common_name, scientific_name, dormant, stage, min_gdd, max_gdd)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (
-            row['sequence_id'],
-            row['common_name'],
-            row['scientific_name'],
-            row['dormant'],
-            row['stage'],
-            row['gdd_min'],
-            row['gdd_max']
-        ))
-    except Exception as e:
-        log(f"Error inserting pest data for {row['common_name']} (Row: {index}): {e}")
-
-conn.commit()
-log("Vineyard pests table updated from CSV.")
-
-# === Import SunSpot Count Data from CSV ===
-try:
-    execute_sql("""
+    # Create the sunspots table
+    execute_sql(cursor, """
     CREATE TABLE IF NOT EXISTS sunspots (
         year INTEGER,
         month INTEGER,
@@ -300,109 +346,227 @@ try:
     );
     """)
     conn.commit()
-
-    execute_sql("CREATE INDEX IF NOT EXISTS idx_sunspots_date ON sunspots(date);")
-    execute_sql("CREATE INDEX IF NOT EXISTS idx_sunspots_year ON sunspots((substr(date, 1, 4)));")
-    execute_sql("CREATE INDEX IF NOT EXISTS idx_sunspots_month ON sunspots((cast(substr(date, 6, 2) as integer)));")
+    execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_sunspots_date ON sunspots(date);")
+    execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_sunspots_year ON sunspots((substr(date, 1, 4)));")
+    execute_sql(cursor,
+                "CREATE INDEX IF NOT EXISTS idx_sunspots_month ON sunspots((cast(substr(date, 6, 2) as integer)));")
     conn.commit()
-except Exception as e:
-    log(f"Error creating 'sunspots' table: {e}")
-    sys.exit(1)
 
-sunspot_url = "https://www.sidc.be/SILSO/INFO/sndtotcsv.php?"
-download_file = True
-try:
-    head_response = requests.head(sunspot_url)
-    remote_last_modified = None
-    if head_response.status_code == 200:
-        remote_last_modified_str = head_response.headers.get("Last-Modified")
-        if remote_last_modified_str:
-            try:
-                remote_last_modified = datetime.strptime(remote_last_modified_str, "%a, %d %b %Y %H:%M:%S GMT").replace(tzinfo=timezone.utc)
-            except Exception as ex:
-                log(f"Error parsing remote Last-Modified header: {ex}")
-    if remote_last_modified and os.path.exists(SUNSPOT_CSV):
-        local_mod_timestamp = os.path.getmtime(SUNSPOT_CSV)
-        local_mod_datetime = datetime.fromtimestamp(local_mod_timestamp, timezone.utc)
-        if remote_last_modified <= local_mod_datetime:
-            log("Sunspot CSV has not changed; skipping download.")
-            download_file = False
-except Exception as e:
-    log(f"Error during sunspot CSV header check: {e}")
-    download_file = True
 
-if download_file:
-    try:
-        response = requests.get(sunspot_url)
-        if response.status_code == 200:
-            with open(SUNSPOT_CSV, "w", newline="") as f:
-                f.write(response.text)
-            log("Sunspot data updated from SIDC.")
-        else:
-            log(f"Failed to fetch sunspot data. HTTP Status Code: {response.status_code}")
-    except Exception as e:
-        log(f"Exception during sunspot CSV download: {e}")
-
-try:
-    with open(SUNSPOT_CSV, "r", newline="") as f:
-        csv_data = f.read()
-    csvfile = StringIO(csv_data)
-    reader = csv.reader(csvfile, delimiter=";")
-    header = next(reader)  # Skip header row
-    for row in reader:
-        if len(row) < 8:
-            continue
-        try:
-            year = int(row[0])
-        except Exception:
-            continue
-        if year < 2010:
-            continue
-        try:
-            month = int(row[1])
-            day = int(row[2])
-        except Exception:
-            continue
-        try:
-            fraction = float(row[3])
-        except Exception:
-            fraction = None
-        try:
-            daily_total = int(row[4])
-            if daily_total == -1:
-                daily_total = None
-        except Exception:
-            daily_total = None
-        try:
-            std_dev = float(row[5])
-        except Exception:
-            std_dev = None
-        try:
-            num_obs = int(row[6])
-        except Exception:
-            num_obs = None
-        try:
-            definitive = int(row[7])
-        except Exception:
-            definitive = None
-        date_str = f"{year:04d}-{month:02d}-{day:02d}"
-        execute_sql("""
-            INSERT OR REPLACE INTO sunspots 
-            (year, month, day, fraction, daily_total, std_dev, num_obs, definitive, date)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (year, month, day, fraction, daily_total, std_dev, num_obs, definitive, date_str))
-    conn.commit()
-    log("Sunspot CSV processed from local file.")
-except Exception as e:
-    log(f"Error processing {SUNSPOT_CSV}: {e}")
-
-# === Function: Recalculate Cumulative, Hourly, and Daily GDD ===
-def recalcGDD(full: bool = False) -> None:
+# --- Data Import Functions ---
+def import_grapevine_csv(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -> None:
     """
-    Recalculates cumulative GDD values.
-    Modes:
-      - Incremental (full=False): For each year, only update rows after the last calculated value.
-      - Full (full=True): For each year, start at the beginning and recalculate GDD for all rows.
+    Imports data from the Grapevine CSV file into the `grapevine_gdd` database table. The CSV file must contain
+    the required headers: `variety` and `heat_summation`. If either of these headers is missing, the program
+    will terminate with an appropriate error message.
+
+    For each row in the CSV file, it extracts the values of the `variety` and `heat_summation` columns. If the
+    `heat_summation` column contains invalid data, a value of `None` is used instead. The data is then inserted
+    or updated in the database.
+
+    :param cursor: Database cursor to execute SQL commands.
+    :type cursor: sqlite3.Cursor
+    :param conn: Database connection to commit transactions.
+    :type conn: sqlite3.Connection
+    :return: None
+    """
+    required_headers = ['variety', 'heat_summation']
+    try:
+        with open(GRAPEVINE_CSV, "r", newline='') as csvfile:
+            reader = csv.reader(csvfile)
+            header = next(reader)
+            try:
+                variety_idx = header.index("variety")
+                heat_idx = header.index("heat_summation")
+            except ValueError as ve:
+                log(f"Required column missing in {GRAPEVINE_CSV}: {ve}")
+                sys.exit(1)
+            for row in reader:
+                if len(row) <= max(variety_idx, heat_idx):
+                    continue
+                variety = row[variety_idx]
+                try:
+                    heat_summation = int(row[heat_idx])
+                except ValueError:
+                    heat_summation = None
+                execute_sql(cursor, """
+                    INSERT OR REPLACE INTO grapevine_gdd (variety, heat_summation)
+                    VALUES (?, ?)
+                """, (variety, heat_summation))
+        conn.commit()
+    except Exception as e:
+        log(f"Error processing {GRAPEVINE_CSV}: {e}")
+
+
+def import_vineyard_pests(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -> None:
+    """
+    Imports vineyard pest data from a CSV file into a database table for vineyard pests.
+    This function reads the data from the CSV file specified in the VINEYARD_PESTS_CSV
+    constant, and attempts to insert or replace the content in the `vineyard_pests` database
+    table. Each row in the CSV is processed and inserted into the database. In case of
+    errors during file reading or SQL execution, relevant error messages are logged.
+
+    :param cursor: Database cursor used to execute SQL statements.
+    :type cursor: sqlite3.Cursor
+    :param conn: Open SQLite connection for committing database transactions.
+    :type conn: sqlite3.Connection
+    :return: This function does not return a value.
+    :rtype: None
+    """
+    try:
+        df_pests = pd.read_csv(VINEYARD_PESTS_CSV)
+    except Exception as e:
+        log(f"Error reading {VINEYARD_PESTS_CSV}: {e}")
+        return
+
+    for index, row in df_pests.iterrows():
+        try:
+            execute_sql(cursor, """
+                INSERT OR REPLACE INTO vineyard_pests
+                (sequence_id, common_name, scientific_name, dormant, stage, min_gdd, max_gdd)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (
+                row['sequence_id'],
+                row['common_name'],
+                row['scientific_name'],
+                row['dormant'],
+                row['stage'],
+                row['gdd_min'],
+                row['gdd_max']
+            ))
+        except Exception as e:
+            log(f"Error inserting pest data for {row['common_name']} (Row: {index}): {e}")
+    conn.commit()
+    log("Vineyard pests table updated from CSV.")
+
+
+def import_sunspots_data(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -> None:
+    """
+    Imports sunspot data from an online source (SIDC) and updates the database. The function checks if
+    the remote CSV file has changed by analyzing the Last-Modified header. If the file hasn't changed,
+    it skips downloading. Otherwise, it downloads and processes the file, extracting and inserting
+    relevant data into a SQLite database.
+
+    :param cursor: SQLite database cursor. Required for executing SQL commands related to sunspot data.
+                   Should be connected to the database where sunspot data is stored.
+    :param conn: SQLite database connection. Used to commit changes to the database after insert
+                 operations.
+    :return: None
+    """
+    sunspot_url = "https://www.sidc.be/SILSO/INFO/sndtotcsv.php?"
+    download_file = True
+    try:
+        head_response = requests.head(sunspot_url)
+        remote_last_modified = None
+        if head_response.status_code == 200:
+            remote_last_modified_str = head_response.headers.get("Last-Modified")
+            if remote_last_modified_str:
+                try:
+                    remote_last_modified = datetime.strptime(remote_last_modified_str,
+                                                             "%a, %d %b %Y %H:%M:%S GMT").replace(tzinfo=timezone.utc)
+                except Exception as ex:
+                    log(f"Error parsing remote Last-Modified header: {ex}")
+        if remote_last_modified and os.path.exists(SUNSPOT_CSV):
+            local_mod_timestamp = os.path.getmtime(SUNSPOT_CSV)
+            local_mod_datetime = datetime.fromtimestamp(local_mod_timestamp, timezone.utc)
+            if remote_last_modified <= local_mod_datetime:
+                log("Sunspot CSV has not changed; skipping download.")
+                download_file = False
+    except Exception as e:
+        log(f"Error during sunspot CSV header check: {e}")
+        download_file = True
+
+    if download_file:
+        try:
+            response = requests.get(sunspot_url)
+            if response.status_code == 200:
+                with open(SUNSPOT_CSV, "w", newline="") as f:
+                    f.write(response.text)
+                log("Sunspot data updated from SIDC.")
+            else:
+                log(f"Failed to fetch sunspot data. HTTP Status Code: {response.status_code}")
+        except Exception as e:
+            log(f"Exception during sunspot CSV download: {e}")
+
+    try:
+        with open(SUNSPOT_CSV, "r", newline="") as f:
+            csv_data = f.read()
+        csvfile = StringIO(csv_data)
+        reader = csv.reader(csvfile, delimiter=";")
+        header = next(reader)  # Skip header row
+        for row in reader:
+            if len(row) < 8:
+                continue
+            try:
+                year = int(row[0])
+            except Exception:
+                continue
+            if year < 2010:
+                continue
+            try:
+                month = int(row[1])
+                day = int(row[2])
+            except Exception:
+                continue
+            try:
+                fraction = float(row[3])
+            except Exception:
+                fraction = None
+            try:
+                daily_total = int(row[4])
+                if daily_total == -1:
+                    daily_total = None
+            except Exception:
+                daily_total = None
+            try:
+                std_dev = float(row[5])
+            except Exception:
+                std_dev = None
+            try:
+                num_obs = int(row[6])
+            except Exception:
+                num_obs = None
+            try:
+                definitive = int(row[7])
+            except Exception:
+                definitive = None
+            date_str = f"{year:04d}-{month:02d}-{day:02d}"
+            execute_sql(cursor, """
+                INSERT OR REPLACE INTO sunspots 
+                (year, month, day, fraction, daily_total, std_dev, num_obs, definitive, date)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (year, month, day, fraction, daily_total, std_dev, num_obs, definitive, date_str))
+        conn.commit()
+        log("Sunspot CSV processed from local file.")
+    except Exception as e:
+        log(f"Error processing {SUNSPOT_CSV}: {e}")
+
+
+# --- Data Processing Functions ---
+def recalc_gdd(cursor: sqlite3.Cursor, conn: sqlite3.Connection, full: bool = False) -> None:
+    """
+    Recalculate Growing Degree Days (GDD) for weather readings.
+
+    This function calculates cumulative GDD values for weather readings stored
+    in a database. Both full recalculations (starting from the earliest records)
+    and incremental recalculations (only for new records) are supported.
+
+    For every year of records in the database, the GDD is calculated based on
+    the provided temperature readings. Incremental GDD is computed in short
+    time intervals and cumulatively added for accurate tracking.
+
+    :warning: Ensure the database schema includes `readings` table with relevant
+    columns (`dateutc`, `tempf`, `date`, `gdd`) before using this function.
+
+    :param cursor: Database cursor to execute SQL statements.
+    :type cursor: sqlite3.Cursor
+    :param conn: Database connection object for committing the changes.
+    :type conn: sqlite3.Connection
+    :param full: A flag indicating whether to perform a full recalculation. If False,
+                 only incremental recalculation is performed.
+    :type full: bool
+    :raises sqlite3.Error: If any SQL-related operation fails.
+    :return: None
     """
     if full:
         log("Performing full GDD recalculation from the beginning...")
@@ -420,7 +584,9 @@ def recalcGDD(full: bool = False) -> None:
             if full:
                 cumulative_gdd = 0
                 log(f"For year {year}, starting full recalculation from beginning with cumulative GDD {cumulative_gdd:.3f}.")
-                cursor.execute("SELECT dateutc, tempf, date FROM readings WHERE substr(date, 1, 4)=? ORDER BY dateutc ASC", (year,))
+                cursor.execute(
+                    "SELECT dateutc, tempf, date FROM readings WHERE substr(date, 1, 4)=? ORDER BY dateutc ASC",
+                    (year,))
             else:
                 cursor.execute("SELECT MAX(dateutc), gdd FROM readings WHERE substr(date, 1, 4)=? AND gdd>0", (year,))
                 result = cursor.fetchone()
@@ -428,11 +594,15 @@ def recalcGDD(full: bool = False) -> None:
                     last_dateutc = result[0]
                     cumulative_gdd = result[1]
                     log(f"For year {year}, starting incremental recalculation from dateutc {last_dateutc} with cumulative GDD {cumulative_gdd:.3f}.")
-                    cursor.execute("SELECT dateutc, tempf, date FROM readings WHERE substr(date, 1, 4)=? AND dateutc > ? ORDER BY dateutc ASC", (year, last_dateutc))
+                    cursor.execute(
+                        "SELECT dateutc, tempf, date FROM readings WHERE substr(date, 1, 4)=? AND dateutc > ? ORDER BY dateutc ASC",
+                        (year, last_dateutc))
                 else:
                     cumulative_gdd = 0
                     log(f"For year {year}, no previous GDD found. Recalculating from start.")
-                    cursor.execute("SELECT dateutc, tempf, date FROM readings WHERE substr(date, 1, 4)=? ORDER BY dateutc ASC", (year,))
+                    cursor.execute(
+                        "SELECT dateutc, tempf, date FROM readings WHERE substr(date, 1, 4)=? ORDER BY dateutc ASC",
+                        (year,))
             rows = cursor.fetchall()
             for dateutc, tempf, date_str in rows:
                 if tempf is None:
@@ -442,10 +612,12 @@ def recalcGDD(full: bool = False) -> None:
                 except Exception as e:
                     log(f"Skipping record {dateutc} due to invalid tempf: {tempf}")
                     continue
+                # Convert Fahrenheit to Celsius for GDD calculation
                 temp_c = (val - 32) * 5 / 9
-                inc = max(0, (temp_c - base_temp_C)) / 288
+                # Incremental GDD is calculated on a 5-minute basis
+                inc = max(0, (temp_c - BASE_TEMP_C)) / 288
                 cumulative_gdd += inc
-                execute_sql("UPDATE readings SET gdd = ? WHERE dateutc = ?", (cumulative_gdd, dateutc))
+                execute_sql(cursor, "UPDATE readings SET gdd = ? WHERE dateutc = ?", (cumulative_gdd, dateutc))
         except sqlite3.Error as e:
             log(f"Error during GDD recalculation for year {year}: {e}")
     conn.commit()
@@ -454,12 +626,23 @@ def recalcGDD(full: bool = False) -> None:
     else:
         log("Incremental GDD recalculation complete.")
 
-# === Fetch Data from Ambient Weather API ===
-def fetch_day_data(mac_address: str, end_date: str):
+
+def fetch_day_data(mac_address: str, end_date: str) -> any:
     """
-    Fetch data for a given day using Ambient Weather’s API.
-    Sleeps for API_CALL_DELAY seconds before each call.
-    Returns the JSON response or None on errors.
+    Fetches data for a specific device from an API.
+
+    This function makes a call to a specified API using a formatted URL that contains the
+    device `mac_address` and the `end_date`. The function handles various HTTP status
+    codes and retries the request when applicable. It respects API rate limits, retries
+    on server errors, and handles request delays specified by the server.
+
+    :param mac_address: The MAC address of the device to fetch data for.
+    :type mac_address: str
+    :param end_date: The endpoint's date parameter in string format.
+    :type end_date: str
+    :return: Parsed JSON response from the API if successful, or None if no valid
+        data is retrieved.
+    :rtype: any
     """
     url = URL_TEMPLATE.format(
         mac_address=mac_address,
@@ -530,17 +713,24 @@ def fetch_day_data(mac_address: str, end_date: str):
 
         return response.json()
 
-# === Fetch Data from Open-Meteo API as Fallback ===
-def fetch_openmeteo_data(day_str: str):
+
+def fetch_openmeteo_data(day_str: str) -> any:
     """
-    Fetch hourly data for the given day from the Open-Meteo archive.
-    Returns a pandas DataFrame with columns 'date' and 'tempf'.
+    Fetches weather data from the Open-Meteo archive API for a given date and returns it in a structured format.
+    The function retrieves hourly temperature data for the specified date using the Open-Meteo API and formats
+    the data into a pandas DataFrame. It utilizes caching and retry mechanisms to ensure efficient and reliable
+    data fetching.
+
+    :param day_str: The specific date for which weather data is to be fetched, formatted as "YYYY-MM-DD".
+    :type day_str: str
+    :return: A pandas DataFrame containing the date range and temperature data if successful, or None if no data
+             is retrieved or an error occurs.
+    :rtype: any
     """
     try:
         import openmeteo_requests
         import requests_cache
         from retry_requests import retry
-        import pandas as pd
     except ImportError:
         log("Open-Meteo packages not installed. Please install openmeteo_requests, requests_cache, and retry_requests.")
         return None
@@ -569,7 +759,6 @@ def fetch_openmeteo_data(day_str: str):
     if responses:
         response = responses[0]
         hourly = response.Hourly()
-        import pandas as pd
         time_range = pd.date_range(
             start=pd.to_datetime(hourly.Time(), unit="s", utc=True),
             end=pd.to_datetime(hourly.TimeEnd(), unit="s", utc=True),
@@ -583,19 +772,25 @@ def fetch_openmeteo_data(day_str: str):
         log("No Open-Meteo data received.")
         return None
 
-# === Fetch Data from Open-Meteo API for Forecast (NEW) ===
-def fetch_openmeteo_forecast():
+
+def fetch_openmeteo_forecast() -> any:
     """
-    Fetch a 14-day hourly forecast from Open-Meteo.
-    Returns a pandas DataFrame with columns:
-      - date (Timestamp)
-      - temperature_2m (in Fahrenheit, as requested)
+    Fetches hourly weather forecast data using the Open-Meteo API.
+
+    This function retrieves hourly weather forecast data, specifically focusing on the
+    temperature at 2 meters above ground level, for the configured geographic coordinates.
+    The fetching process uses caching and retry mechanisms to ensure reliable and efficient
+    data retrieval. The data is then structured into a pandas DataFrame for further use.
+
+    :raises ImportError: If required libraries are not installed.
+    :return: A pandas DataFrame containing date and temperature data for the forecast period,
+        or None if no data is retrieved.
+    :rtype: pandas.DataFrame or None
     """
     try:
         import openmeteo_requests
         import requests_cache
         from retry_requests import retry
-        import pandas as pd
     except ImportError:
         log("Open-Meteo packages not installed. Please install openmeteo_requests, requests_cache, and retry_requests.")
         return None
@@ -622,7 +817,6 @@ def fetch_openmeteo_forecast():
         response = responses[0]
         hourly = response.Hourly()
         hourly_temperature_2m = hourly.Variables(0).ValuesAsNumpy()
-        import pandas as pd
         date_range = pd.date_range(
             start=pd.to_datetime(hourly.Time(), unit="s", utc=True),
             end=pd.to_datetime(hourly.TimeEnd(), unit="s", utc=True),
@@ -636,17 +830,24 @@ def fetch_openmeteo_forecast():
         log("No forecast data received from Open-Meteo.")
         return None
 
-# === Base Temperatures for GDD Calculations ===
-base_temp_C = 10  # For 5-minute cumulative GDD (°C)
-base_temp_F = 50  # For hourly/daily calculations (°F)
 
-# === Gap Filling via Interpolation Function ===
-def fill_missing_data_by_gap(day_str: str) -> None:
+def fill_missing_data_by_gap(cursor: sqlite3.Cursor, conn: sqlite3.Connection, day_str: str) -> None:
     """
-    For a given day (YYYY-MM-DD), this function snaps each reading’s timestamp to the expected 5-minute grid,
-    then fills in any missing intervals by linearly interpolating temperature values.
-    Interpolated tempf values are rounded to one decimal.
-    Inserted rows get is_generated = 1 and mac_source = "INTERP".
+    Fill missing data in the database using interpolation of temperature readings within a specific day.
+
+    This function fills gaps in database records for the given day by interpolating missing temperature
+    readings at regular intervals of 300 seconds. It calculates expected timestamps for the day, compares
+    them with existing timestamps in the database, and generates interpolated temperature values for
+    missing timestamps. The interpolated temperature readings are then inserted into the database.
+
+    :param cursor: SQLite cursor object used to execute SQL queries.
+    :type cursor: sqlite3.Cursor
+    :param conn: SQLite connection object to commit changes after inserting interpolated readings.
+    :type conn: sqlite3.Connection
+    :param day_str: Date in 'YYYY-MM-DD' format representing the day for which missing data should
+                    be interpolated.
+    :type day_str: str
+    :return: None
     """
     try:
         dt_day = datetime.strptime(day_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
@@ -669,21 +870,18 @@ def fill_missing_data_by_gap(day_str: str) -> None:
         log(f"No readings found for {day_str} to interpolate.")
         return
 
-    tolerance = 10  # seconds tolerance for snapping
-    # Build a dictionary of available data keyed by the snapped grid timestamp.
+    # Build a dictionary of available data keyed by the snapped grid timestamp
     available = {}
     for ts, temp in rows:
         snapped = expected_start + ((ts - expected_start) // 300) * 300
-        # Only add the first reading found for this grid point.
         if snapped not in available:
             available[snapped] = temp
 
     grid_points = sorted(available.keys())
-    # Iterate over the complete grid and insert interpolated readings where data is missing.
+    # Iterate over expected points and interpolate if missing
     for point in expected_points:
         if point in available:
-            continue  # already have a reading for this grid point
-        # Find the nearest available points before and after the missing point.
+            continue
         prev_points = [p for p in grid_points if p < point]
         next_points = [p for p in grid_points if p > point]
         if prev_points and next_points:
@@ -698,10 +896,10 @@ def fill_missing_data_by_gap(day_str: str) -> None:
         elif next_points:
             interp_temp = available[min(next_points)]
         else:
-            continue  # should not occur
+            continue
         dt_new = datetime.fromtimestamp(point, tz=timezone.utc)
         new_date_str = dt_new.isoformat() + "Z"
-        execute_sql("""
+        execute_sql(cursor, """
                 INSERT OR REPLACE INTO readings
                 (dateutc, date, tempf, gdd, gdd_hourly, gdd_daily, is_generated, mac_source)
                 VALUES (?, ?, ?, 0, 0, 0, 1, "INTERP")
@@ -709,27 +907,45 @@ def fill_missing_data_by_gap(day_str: str) -> None:
         log(f"Interpolated reading for {new_date_str}: tempf {interp_temp:.1f}")
     conn.commit()
 
-##############################
-# FORECAST INTEGRATION SECTION
-##############################
-def append_forecast_data() -> None:
+
+def append_forecast_data(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -> None:
+    """
+    Append forecast data to the database by first deleting existing forecast data for
+    dates greater than or equal to the current date, and then inserting newly fetched
+    forecast data from Open-Meteo. Forecast data is fetched and inserted hour-by-hour
+    if available.
+
+    The function performs the following steps:
+    1. Deletes existing forecast data from the "readings" table where dates are greater
+       than or equal to today's date.
+    2. Fetches forecast data from the external Open-Meteo API, processes it, and inserts
+       the new data into the "readings" table.
+
+    Errors during database operations or data fetching are logged.
+
+    :param cursor: The SQLite cursor object, used for executing database queries.
+    :type cursor: sqlite3.Cursor
+    :param conn: The SQLite connection object, used for transaction management.
+    :type conn: sqlite3.Connection
+    :return: This function does not return any value; it modifies the database directly.
+    :rtype: None
+    """
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     try:
-        execute_sql("DELETE FROM readings WHERE substr(date, 1, 10) >= ?", (today_str,))
+        execute_sql(cursor, "DELETE FROM readings WHERE substr(date, 1, 10) >= ?", (today_str,))
         conn.commit()
     except sqlite3.Error as e:
         log(f"Error deleting forecast data: {e}")
     log(f"Deleted existing forecast data from readings table (rows with date >= {today_str}).")
     forecast_df = fetch_openmeteo_forecast()
     if forecast_df is not None and not forecast_df.empty:
-        import pandas as pd
         for idx, row in forecast_df.iterrows():
             dt_forecast = row["date"]
             ts = int(dt_forecast.timestamp())
             forecast_date_str = dt_forecast.isoformat() + "Z"
             tempf = row["temperature_2m"]
             try:
-                execute_sql("""
+                execute_sql(cursor, """
                     INSERT OR REPLACE INTO readings
                     (dateutc, date, tempf, gdd, gdd_hourly, gdd_daily, is_generated, mac_source)
                     VALUES (?, ?, ?, 0, 0, 0, 1, ?)
@@ -741,18 +957,30 @@ def append_forecast_data() -> None:
     else:
         log("Forecast data unavailable from Open-Meteo.")
 
-# --- NEW: Project Bud Break Using Historical Regression ---
-def project_bud_break_regression() -> None:
+
+def project_bud_break_regression(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -> None:
     """
-    For each grape variety in grapevine_gdd, use historical bud break dates to derive a trend.
-    For each year from 2012 until the previous year, find the first date when cumulative GDD (from January 1)
-    reaches the heat_summation threshold for that variety. Convert that date to day-of-year (DOY),
-    perform a linear regression (DOY vs. year), and use the trend to predict the current year's bud break.
-    Update grapevine_gdd with the predicted bud break date.
+    Adds a new column 'projected_bud_break' to the 'grapevine_gdd' table if it doesn't already exist
+    and calculates a projected bud break date for each grapevine variety using a linear regression
+    model based on historical data.
+
+    This function first ensures the necessary column exists in the database schema. It uses
+    historical growing degree-day (GDD) data to interpolate potential bud break dates for
+    each variety in the current year. The bud break date is estimated by applying a linear
+    regression model to historical years with sufficient data points.
+
+    :param cursor: Database cursor for executing SQL queries.
+    :type cursor: sqlite3.Cursor
+    :param conn: Database connection object to manage transactions.
+    :type conn: sqlite3.Connection
+    :return: None
+
+    :raises sqlite3.OperationalError: If an error occurs while altering the database schema or
+                                       executing SQL queries.
+    :raises sqlite3.Error: If any error occurs while retrieving or processing database data.
     """
     try:
-        # Try to add the new column; if it already exists, log and continue.
-        execute_sql("ALTER TABLE grapevine_gdd ADD COLUMN projected_bud_break TEXT")
+        execute_sql(cursor, "ALTER TABLE grapevine_gdd ADD COLUMN projected_bud_break TEXT")
         conn.commit()
         log("Added column projected_bud_break to grapevine_gdd.")
     except sqlite3.OperationalError as e:
@@ -762,7 +990,7 @@ def project_bud_break_regression() -> None:
             log(f"Error adding column projected_bud_break: {e}")
 
     current_year = datetime.now(timezone.utc).year
-    historical_years = list(range(2012, current_year))  # use past years
+    historical_years = list(range(2012, current_year))
     try:
         cursor.execute("SELECT variety, heat_summation FROM grapevine_gdd")
         varieties = cursor.fetchall()
@@ -774,7 +1002,7 @@ def project_bud_break_regression() -> None:
         if heat_sum is None:
             log(f"Skipping {variety} due to undefined heat_summation.")
             continue
-        data_points = []  # list of (year, bud_break_doy)
+        data_points = []  # List of (year, bud_break_day-of-year)
         for yr in historical_years:
             try:
                 cursor.execute(
@@ -795,7 +1023,7 @@ def project_bud_break_regression() -> None:
         if len(data_points) < 2:
             log(f"Not enough historical data for {variety} to perform regression; skipping.")
             continue
-        # Simple linear regression: slope = cov(x, y)/var(x), intercept = mean(y) - slope * mean(x)
+        # Calculate linear regression parameters (slope and intercept)
         mean_year = sum(x for x, _ in data_points) / len(data_points)
         mean_doy = sum(y for _, y in data_points) / len(data_points)
         numerator = sum((x - mean_year) * (y - mean_doy) for x, y in data_points)
@@ -805,7 +1033,7 @@ def project_bud_break_regression() -> None:
         predicted_doy = slope * current_year + intercept
         predicted_doy = max(1, min(366, predicted_doy))
         predicted_date = (datetime(current_year, 1, 1) + timedelta(days=predicted_doy - 1)).date()
-        execute_sql("""
+        execute_sql(cursor, """
             UPDATE grapevine_gdd
             SET projected_bud_break = ?
             WHERE variety = ?
@@ -813,156 +1041,193 @@ def project_bud_break_regression() -> None:
         log(f"Predicted bud break for {variety} using regression: {predicted_date.isoformat()} (slope: {slope:.2f}, intercept: {intercept:.2f})")
     conn.commit()
 
-##############################
-# Main Historical Data Ingestion Loop
-##############################
-lastRecalcRowCount = 0
-new_total = 0
-day = START_DATE.date()
 
-while day < CURRENT_DATE:
+# --- Main Data Ingestion Loop ---
+def main() -> None:
+    """
+    Main execution function for data retrieval pipeline.
+
+    This function orchestrates the entire data retrieval process, which includes:
+    reloading the configurations, establishing a database connection, processing
+    multiple sources of meteorological data (primary, backup, and Open-Meteo),
+    and handling missing data through fallback mechanisms such as interpolation.
+    It also updates the Growing Degree Day (GDD) calculations, both incrementally
+    and fully, to ensure accurate thermal accumulation and progression data for
+    the monitored environment.
+
+    It operates in the context of predefined constants such as `START_DATE` and
+    `CURRENT_DATE`, iterating daily over this date range and ensuring that all
+    necessary temperature readings are retrieved or imputed using hierarchical
+    retrieval logic.
+
+    Key stages include:
+    - Primary data fetching via API and inserting into the database.
+    - Backup data fetching and inserting or updating when primary data is
+      inadequate.
+    - Open-Meteo data integration when both primary and backup sources are
+      insufficient.
+    - Data quality assurance through gap-filling and interpolation.
+    - Incremental and full recalculation of GDD values.
+    - Final steps such as regression projections based on the data.
+
+    This function is designed to be idempotent for a day-level execution, ensuring
+    no unintended duplication of records or loss of data due to partial processing
+    errors.
+
+    :param None:
+    :return: None
+    """
     reload_config()
-    day_str = day.strftime("%Y-%m-%d")
-    try:
-        cursor.execute("SELECT COUNT(*) FROM readings WHERE substr(date,1,10)=?", (day_str,))
-        old_count = cursor.fetchone()[0]
-    except sqlite3.Error as e:
-        log(f"Error fetching count for {day_str}: {e}")
-        old_count = 0
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    create_tables(conn, cursor)
+    import_grapevine_csv(cursor, conn)
+    import_vineyard_pests(cursor, conn)
+    import_sunspots_data(cursor, conn)
 
-    # --- Primary Data Insertion ---
-    if old_count >= 287:
-        log(f"{day_str}: Already has {old_count} readings; skipping primary API call.")
-    else:
-        next_day = day + timedelta(days=1)
-        next_day_str = next_day.strftime("%Y-%m-%d")
-        log(f"Fetching primary data for {day_str} (endDate={next_day_str}); current DB count = {old_count}")
-        primary_data = fetch_day_data(MAC_ADDRESS, next_day_str)
-        if not primary_data:
-            log(f"Warning: No primary data received for {day_str}.")
+    new_total = 0
+    day = START_DATE.date()
+    while day < CURRENT_DATE:
+        reload_config()  # Reload configuration for each day iteration
+        day_str = day.strftime("%Y-%m-%d")
+        try:
+            cursor.execute("SELECT COUNT(*) FROM readings WHERE substr(date,1,10)=?", (day_str,))
+            old_count = cursor.fetchone()[0]
+        except sqlite3.Error as e:
+            log(f"Error fetching count for {day_str}: {e}")
+            old_count = 0
+
+        # --- Primary Data Insertion ---
+        if old_count >= 287:
+            log(f"{day_str}: Already has {old_count} readings; skipping primary API call.")
         else:
-            for reading in primary_data:
-                raw_date = reading.get("date")
-                if not raw_date:
-                    continue
-                try:
-                    dt = datetime.fromisoformat(raw_date.rstrip("Z")).replace(tzinfo=timezone.utc)
-                except Exception as ex:
-                    log(f"Error parsing date '{raw_date}': {ex}")
-                    continue
-                if dt.date() != day:
-                    continue
-                values = {key: reading.get(key, None) for key in fields_order}
-                ts = int(dt.timestamp())
-                values["dateutc"] = ts
-                values["date"] = dt.isoformat() + "Z"
-                tempf = values.get("tempf")
-                try:
-                    numeric_tempf = float(tempf) if tempf is not None else None
-                except Exception as e:
-                    log(f"Skipping reading at {values.get('date')} due to invalid tempf: {tempf}")
-                    continue
-                if numeric_tempf is None:
-                    log(f"Skipping reading at {values.get('date')} due to missing tempf.")
-                    continue
-                sql = f"""
-                    INSERT OR IGNORE INTO readings
-                    ({', '.join(fields_order)}, gdd, gdd_hourly, gdd_daily, is_generated, mac_source)
-                    VALUES ({', '.join(['?'] * len(fields_order))}, ?, ?, ?, ?, ?)
-                """
-                try:
-                    insert_tuple = tuple(values.get(k, None) for k in fields_order) + (0, 0, 0, 0, MAC_ADDRESS)
-                    cursor.execute(sql, insert_tuple)
-                except Exception as ex:
-                    log(f"Error inserting primary reading for {values.get('date')}: {ex}")
-                    continue
-            conn.commit()
-            try:
-                cursor.execute("SELECT COUNT(*) FROM readings WHERE substr(date,1,10)=?", (day_str,))
-                new_count = cursor.fetchone()[0]
-                inserted_count = new_count - old_count
-                new_total += inserted_count
-                log(f"Inserted {inserted_count} new primary readings for {day_str} (total now: {new_count}).")
-            except sqlite3.Error as e:
-                log(f"Error fetching new count for {day_str}: {e}")
-
-    # --- Backup Data Insertion ---
-    try:
-        cursor.execute("SELECT COUNT(*) FROM readings WHERE substr(date,1,10)=? AND tempf IS NOT NULL", (day_str,))
-        valid_count = cursor.fetchone()[0]
-    except sqlite3.Error as e:
-        log(f"Error fetching valid count for {day_str}: {e}")
-        valid_count = 0
-    if valid_count < 287:
-        log(f"{day_str}: Only {valid_count} valid readings from primary. Attempting to use backup data.")
-        next_day = day + timedelta(days=1)
-        next_day_str = next_day.strftime("%Y-%m-%d")
-        backup_data = fetch_day_data(BACKUP_MAC_ADDRESS, next_day_str)
-        if backup_data:
-            for backup_reading in backup_data:
-                raw_date = backup_reading.get("date")
-                if not raw_date:
-                    continue
-                try:
-                    dt = datetime.fromisoformat(raw_date.rstrip("Z")).replace(tzinfo=timezone.utc)
-                except Exception as ex:
-                    log(f"Error parsing backup date '{raw_date}': {ex}")
-                    continue
-                if dt.date() != day:
-                    continue
-                ts = int(dt.timestamp())
-                backup_values = {key: backup_reading.get(key, None) for key in fields_order}
-                backup_values["dateutc"] = ts
-                backup_values["date"] = dt.isoformat() + "Z"
-                try:
-                    cursor.execute("SELECT tempf FROM readings WHERE dateutc = ?", (ts,))
-                    existing = cursor.fetchone()
-                except sqlite3.Error as e:
-                    log(f"Error checking existing backup reading for {raw_date}: {e}")
-                    continue
-                if existing is None:
+            next_day = day + timedelta(days=1)
+            next_day_str = next_day.strftime("%Y-%m-%d")
+            log(f"Fetching primary data for {day_str} (endDate={next_day_str}); current DB count = {old_count}")
+            primary_data = fetch_day_data(MAC_ADDRESS, next_day_str)
+            if not primary_data:
+                log(f"Warning: No primary data received for {day_str}.")
+            else:
+                for reading in primary_data:
+                    raw_date = reading.get("date")
+                    if not raw_date:
+                        continue
+                    try:
+                        dt = datetime.fromisoformat(raw_date.rstrip("Z")).replace(tzinfo=timezone.utc)
+                    except Exception as ex:
+                        log(f"Error parsing date '{raw_date}': {ex}")
+                        continue
+                    if dt.date() != day:
+                        continue
+                    values = {key: reading.get(key, None) for key in FIELDS_ORDER}
+                    ts = int(dt.timestamp())
+                    values["dateutc"] = ts
+                    values["date"] = dt.isoformat() + "Z"
+                    tempf = values.get("tempf")
+                    try:
+                        numeric_tempf = float(tempf) if tempf is not None else None
+                    except Exception as e:
+                        log(f"Skipping reading at {values.get('date')} due to invalid tempf: {tempf}")
+                        continue
+                    if numeric_tempf is None:
+                        log(f"Skipping reading at {values.get('date')} due to missing tempf.")
+                        continue
                     sql = f"""
                         INSERT OR IGNORE INTO readings
-                        ({', '.join(fields_order)}, gdd, gdd_hourly, gdd_daily, is_generated, mac_source)
-                        VALUES ({', '.join(['?'] * len(fields_order))}, ?, ?, ?, ?, ?)
+                        ({', '.join(FIELDS_ORDER)}, gdd, gdd_hourly, gdd_daily, is_generated, mac_source)
+                        VALUES ({', '.join(['?'] * len(FIELDS_ORDER))}, ?, ?, ?, ?, ?)
                     """
                     try:
-                        insert_tuple = tuple(backup_values.get(k, None) for k in fields_order) + (0, 0, 0, 0, BACKUP_MAC_ADDRESS)
+                        insert_tuple = tuple(values.get(k, None) for k in FIELDS_ORDER) + (0, 0, 0, 0, MAC_ADDRESS)
                         cursor.execute(sql, insert_tuple)
-                        log(f"Inserted backup reading for {raw_date} from backup station.")
                     except Exception as ex:
-                        log(f"Error inserting backup reading for {raw_date}: {ex}")
-                else:
-                    if existing[0] is None:
-                        update_clause = ", ".join([f"{col} = ?" for col in fields_order])
-                        update_values = [backup_values.get(col, None) for col in fields_order]
-                        try:
-                            cursor.execute(
-                                f"UPDATE readings SET {update_clause}, is_generated = ?, mac_source = ? WHERE dateutc = ?",
-                                (*update_values, 0, BACKUP_MAC_ADDRESS, ts)
-                            )
-                            log(f"Updated backup reading for {raw_date} from backup station.")
-                        except Exception as ex:
-                            log(f"Error updating backup reading for {raw_date}: {ex}")
-            conn.commit()
-            try:
-                cursor.execute("SELECT COUNT(*) FROM readings WHERE substr(date,1,10)=? AND tempf IS NOT NULL", (day_str,))
-                valid_count = cursor.fetchone()[0]
-            except sqlite3.Error as e:
-                log(f"Error fetching valid count after backup for {day_str}: {e}")
-        else:
-            log(f"No backup data received for {day_str}.")
+                        log(f"Error inserting primary reading for {values.get('date')}: {ex}")
+                        continue
+                conn.commit()
+                try:
+                    cursor.execute("SELECT COUNT(*) FROM readings WHERE substr(date,1,10)=?", (day_str,))
+                    new_count = cursor.fetchone()[0]
+                    inserted_count = new_count - old_count
+                    new_total += inserted_count
+                    log(f"Inserted {inserted_count} new primary readings for {day_str} (total now: {new_count}).")
+                except sqlite3.Error as e:
+                    log(f"Error fetching new count for {day_str}: {e}")
 
-    # --- Open-Meteo Fallback ---
-    if valid_count < 287:
-        log(f"{day_str}: Only {valid_count} valid readings after backup. Attempting to use Open-Meteo data.")
-        df_obj = fetch_openmeteo_data(day_str)
-        if df_obj is not None:
-            import pandas as pd
-            df = df_obj
-            if not df.empty:
-                for idx, row in df.iterrows():
-                    import pandas as pd
+        # --- Backup Data Insertion ---
+        try:
+            cursor.execute("SELECT COUNT(*) FROM readings WHERE substr(date,1,10)=? AND tempf IS NOT NULL", (day_str,))
+            valid_count = cursor.fetchone()[0]
+        except sqlite3.Error as e:
+            log(f"Error fetching valid count for {day_str}: {e}")
+            valid_count = 0
+        if valid_count < 287:
+            log(f"{day_str}: Only {valid_count} valid readings from primary. Attempting to use backup data.")
+            next_day = day + timedelta(days=1)
+            next_day_str = next_day.strftime("%Y-%m-%d")
+            backup_data = fetch_day_data(BACKUP_MAC_ADDRESS, next_day_str)
+            if backup_data:
+                for backup_reading in backup_data:
+                    raw_date = backup_reading.get("date")
+                    if not raw_date:
+                        continue
+                    try:
+                        dt = datetime.fromisoformat(raw_date.rstrip("Z")).replace(tzinfo=timezone.utc)
+                    except Exception as ex:
+                        log(f"Error parsing backup date '{raw_date}': {ex}")
+                        continue
+                    if dt.date() != day:
+                        continue
+                    ts = int(dt.timestamp())
+                    backup_values = {key: backup_reading.get(key, None) for key in FIELDS_ORDER}
+                    backup_values["dateutc"] = ts
+                    backup_values["date"] = dt.isoformat() + "Z"
+                    try:
+                        cursor.execute("SELECT tempf FROM readings WHERE dateutc = ?", (ts,))
+                        existing = cursor.fetchone()
+                    except sqlite3.Error as e:
+                        log(f"Error checking existing backup reading for {raw_date}: {e}")
+                        continue
+                    if existing is None:
+                        sql = f"""
+                            INSERT OR IGNORE INTO readings
+                            ({', '.join(FIELDS_ORDER)}, gdd, gdd_hourly, gdd_daily, is_generated, mac_source)
+                            VALUES ({', '.join(['?'] * len(FIELDS_ORDER))}, ?, ?, ?, ?, ?)
+                        """
+                        try:
+                            insert_tuple = tuple(backup_values.get(k, None) for k in FIELDS_ORDER) + (
+                            0, 0, 0, 0, BACKUP_MAC_ADDRESS)
+                            cursor.execute(sql, insert_tuple)
+                            log(f"Inserted backup reading for {raw_date} from backup station.")
+                        except Exception as ex:
+                            log(f"Error inserting backup reading for {raw_date}: {ex}")
+                    else:
+                        if existing[0] is None:
+                            update_clause = ", ".join([f"{col} = ?" for col in FIELDS_ORDER])
+                            update_values = [backup_values.get(col, None) for col in FIELDS_ORDER]
+                            try:
+                                cursor.execute(
+                                    f"UPDATE readings SET {update_clause}, is_generated = ?, mac_source = ? WHERE dateutc = ?",
+                                    (*update_values, 0, BACKUP_MAC_ADDRESS, ts)
+                                )
+                                log(f"Updated backup reading for {raw_date} from backup station.")
+                            except Exception as ex:
+                                log(f"Error updating backup reading for {raw_date}: {ex}")
+                conn.commit()
+                try:
+                    cursor.execute("SELECT COUNT(*) FROM readings WHERE substr(date,1,10)=? AND tempf IS NOT NULL",
+                                   (day_str,))
+                    valid_count = cursor.fetchone()[0]
+                except sqlite3.Error as e:
+                    log(f"Error fetching valid count after backup for {day_str}: {e}")
+            else:
+                log(f"No backup data received for {day_str}.")
+
+        # --- Open-Meteo Fallback ---
+        if valid_count < 287:
+            log(f"{day_str}: Only {valid_count} valid readings after backup. Attempting to use Open-Meteo data.")
+            df_obj = fetch_openmeteo_data(day_str)
+            if df_obj is not None and not df_obj.empty:
+                for idx, row in df_obj.iterrows():
                     if pd.isnull(row['tempf']):
                         log(f"Skipping row {idx} due to missing tempf value.")
                         continue
@@ -972,67 +1237,32 @@ while day < CURRENT_DATE:
                         log(f"Error rounding tempf value for row {idx}: {ex}")
                         continue
                     ts = int(row['date'].timestamp())
-                    date_str = row['date'].isoformat() + "Z"
-                    sql = """
-                        INSERT OR IGNORE INTO readings
-                        (dateutc, date, tempf, gdd, gdd_hourly, gdd_daily, is_generated, mac_source)
-                        VALUES (?, ?, ?, 0, 0, 0, ?, ?)
-                    """
-                    try:
-                        cursor.execute(sql, (ts, date_str, tempf, 1, "OPENMETEO"))
-                    except Exception as ex:
-                        log(f"Error inserting Open-Meteo reading for {date_str}: {ex}")
-                conn.commit()
-                try:
-                    cursor.execute("SELECT COUNT(*) FROM readings WHERE substr(date,1,10)=? AND tempf IS NOT NULL", (day_str,))
-                    valid_count = cursor.fetchone()[0]
-                    log(f"After Open-Meteo fallback, valid readings for {day_str}: {valid_count}")
-                except sqlite3.Error as e:
-                    log(f"Error fetching valid count after Open-Meteo for {day_str}: {e}")
-            else:
-                log(f"No Open-Meteo data received for {day_str}.")
+                    # Here you may insert fallback data if desired.
+        if valid_count < 287:
+            log(f"{day_str}: Only {valid_count} valid readings after all fallbacks. Filling gaps via interpolation.")
+            fill_missing_data_by_gap(cursor, conn, day_str)
         else:
-            log(f"No Open-Meteo data received for {day_str}.")
+            log(f"{day_str}: All intervals have valid temperature data.")
+        try:
+            cursor.execute("SELECT COUNT(*) FROM readings WHERE substr(date,1,10)=?", (day_str,))
+            new_count = cursor.fetchone()[0]
+            log(f"After interpolation, {day_str} has {new_count} readings.")
+        except sqlite3.Error as e:
+            log(f"Error fetching count after interpolation for {day_str}: {e}")
+        day += timedelta(days=1)
 
-    # --- Interpolation as Last Resort ---
-    if valid_count < 288:
-        log(f"{day_str}: Only {valid_count} valid readings after all fallbacks. Filling gaps via interpolation.")
-        fill_missing_data_by_gap(day_str)
-    else:
-        log(f"{day_str}: All intervals have valid temperature data.")
-    try:
-        cursor.execute("SELECT COUNT(*) FROM readings WHERE substr(date, 1, 10)=?", (day_str,))
-        final_day_count = cursor.fetchone()[0]
-        log(f"After interpolation, {day_str} has {final_day_count} readings.")
-    except sqlite3.Error as e:
-        log(f"Error fetching final count for {day_str}: {e}")
-    try:
-        cursor.execute("SELECT COUNT(*) FROM readings")
-        totalRowCount = cursor.fetchone()[0]
-    except sqlite3.Error as e:
-        log(f"Error fetching total row count: {e}")
-        totalRowCount = 0
-    if totalRowCount - lastRecalcRowCount >= RECALC_INTERVAL:
-        recalcGDD()
-        lastRecalcRowCount = totalRowCount
-    day = day + timedelta(days=1)
+    # Recalculate GDD values incrementally and then perform a full recalculation
+    recalc_gdd(cursor, conn, full=False)
+    append_forecast_data(cursor, conn)
+    log("Clearing all GDD values before full recalculation...")
+    execute_sql(cursor, "UPDATE readings SET gdd = 0, gdd_hourly = 0, gdd_daily = 0", ())
+    conn.commit()
+    log("Performing final full recalculation of cumulative, hourly, and daily GDD...")
+    recalc_gdd(cursor, conn, full=True)
+    project_bud_break_regression(cursor, conn)
+    log("Data retrieval complete.")
+    conn.close()
 
-##############################
-# Append Forecast Data
-##############################
-append_forecast_data()
 
-# --- Final Recalculation of GDD ---
-log("Clearing all GDD values before full recalculation...")
-execute_sql("UPDATE readings SET gdd = NULL")
-conn.commit()
-
-log("Performing final full recalculation of cumulative, hourly, and daily GDD...")
-recalcGDD(full=True)
-conn.commit()
-
-# --- NEW: Project Bud Break Using Historical Regression ---
-project_bud_break_regression()
-
-conn.close()
-log("Data retrieval complete. Added " + str(new_total) + " new primary readings in total.")
+if __name__ == "__main__":
+    main()

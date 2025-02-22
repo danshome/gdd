@@ -22,6 +22,7 @@ import sqlite3
 import sys
 import time
 import requests
+import subprocess
 import csv
 from io import StringIO
 from datetime import datetime, timedelta, timezone
@@ -193,6 +194,29 @@ def reload_config() -> None:
 
 
 # --- Database Functions ---
+def ensure_database_exists() -> None:
+    """
+    Ensures that the SQLite database file exists.
+    If it doesn't, attempts to run 'dvc pull <DB_FILENAME>'.
+    If after the pull the file is still missing, prompts the user
+    to decide whether to create a new database.
+    """
+    if not os.path.exists(DB_FILENAME):
+        log("Database file not found. Attempting to retrieve it using 'dvc pull'...")
+        try:
+            # Run dvc pull command for the tracked database file.
+            subprocess.check_call(["dvc", "pull", DB_FILENAME])
+        except subprocess.CalledProcessError as e:
+            log(f"Error during dvc pull: {e}")
+        if not os.path.exists(DB_FILENAME):
+            answer = input("Database file still missing after dvc pull. Create a new database? (y/n): ")
+            if answer.lower().startswith("y"):
+                log("Proceeding with creation of a new database.")
+            else:
+                log("Exiting program.")
+                sys.exit(1)
+
+
 def get_db_connection() -> sqlite3.Connection:
     """
     Establishes a connection to the SQLite database and returns the connection object.
@@ -1078,6 +1102,7 @@ def main() -> None:
     :return: None
     """
     reload_config()
+    ensure_database_exists()
     conn = get_db_connection()
     cursor = conn.cursor()
     create_tables(conn, cursor)

@@ -41,7 +41,8 @@ jobs:
       - name: Configure DVC Remote with Service Account Credentials
         run: |
           echo "${{ secrets.GDRIVE_SERVICE_ACCOUNT }}" | base64 --decode > service_account.json
-          dvc remote modify --local myremote gdrive_service_account_file service_account.json
+          dvc remote modify myremote gdrive_use_service_account true
+          dvc remote modify --local myremote gdrive_service_account_json_file_path service_account.json
 
       - name: DVC Pull Data
         run: dvc pull

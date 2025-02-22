@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1: Check out the repository.
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        # We disable the built-in credential persistence so that we can use our own commit configuration later.
+        with:
+          persist-credentials: false
+
+      # Step 2: Set up Python.
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      # Step 3: Install dependencies from requirements.txt.
+      - name: Install Dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # Step 4: Configure DVC Remote with Google Drive secrets.
+      - name: Configure DVC Remote with Secrets
+        run: |
+          dvc remote modify myremote url "gdrive://${{ secrets.GDRIVE_FOLDER_ID }}"
+          dvc remote modify myremote gdrive_client_id "${{ secrets.GDRIVE_CLIENT_ID }}"
+          dvc remote modify myremote gdrive_client_secret "${{ secrets.GDRIVE_CLIENT_SECRET }}"
+
+      # Step 5: Pull the SQLite database via DVC.
+      - name: DVC Pull Data
+        run: dvc pull
+
+      # Step 6: Run the gdd.py script to update/process the SQLite database.
+      - name: Run gdd.py
+        run: python gdd.py
+
+      # Step 7: Update DVC tracking for the updated SQLite database.
+      - name: Update DVC Tracking for SQLite Database
+        run: dvc add ambient_weather.sqlite
+
+      # Step 8: Commit the updated .dvc file and push the commit.
+      - name: Commit and Push Changes
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add ambient_weather.sqlite.dvc
+          # If there are no changes, this commit command will exit with a non-zero status; we ignore that.
+          git commit -m "Update SQLite database after running gdd.py" || echo "No changes to commit"
+          git push
+
+      # Step 9: Push the updated data to the remote DVC storage.
+      - name: DVC Push Data
+        run: dvc push

@@ -64,6 +64,7 @@ jobs:
           git add ambient_weather.sqlite.dvc
           # If there are no changes, this commit command will exit with a non-zero status; we ignore that.
           git commit -m "Update SQLite database after running gdd.py" || echo "No changes to commit"
+          git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/danshome/gdd.git
           git push
 
       # Step 9: Push the updated data to the remote DVC storage.

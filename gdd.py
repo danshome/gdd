@@ -936,8 +936,9 @@ def append_forecast_data(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -> No
     """
     Append forecast data to the database by first deleting existing forecast data for
     dates greater than or equal to the current date, and then inserting newly fetched
-    forecast data from Open-Meteo. Forecast data is fetched and inserted hour-by-hour
-    if available.
+    forecast data from Open-Meteo. Forecast data is fetched and inserted hour-by-hour.
+    After insertion, the function loops over each forecast day and calls an interpolation
+    routine to generate missing 5‑minute interval readings.
 
     The function performs the following steps:
     1. Deletes existing forecast data from the "readings" table where dates are greater
@@ -961,8 +962,10 @@ def append_forecast_data(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -> No
     except sqlite3.Error as e:
         log(f"Error deleting forecast data: {e}")
     log(f"Deleted existing forecast data from readings table (rows with date >= {today_str}).")
+
     forecast_df = fetch_openmeteo_forecast()
     if forecast_df is not None and not forecast_df.empty:
+        # Insert hourly forecast readings
         for idx, row in forecast_df.iterrows():
             dt_forecast = row["date"]
             ts = int(dt_forecast.timestamp())
@@ -978,6 +981,15 @@ def append_forecast_data(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -> No
                 log(f"Error inserting forecast reading for {forecast_date_str}: {ex}")
         conn.commit()
         log(f"Inserted forecast data for {len(forecast_df)} hours into readings.")
+
+        # Determine unique forecast days from the forecast DataFrame
+        forecast_days = set(row["date"].date() for idx, row in forecast_df.iterrows())
+        for day in sorted(forecast_days):
+            day_str = day.strftime("%Y-%m-%d")
+            log(f"Interpolating missing data for forecast day: {day_str}")
+            fill_missing_data_by_gap(cursor, conn, day_str)
+        conn.commit()
+        log("Completed interpolation for all forecast days.")
     else:
         log("Forecast data unavailable from Open-Meteo.")
 
@@ -1014,7 +1026,20 @@ def project_bud_break_regression(cursor: sqlite3.Cursor, conn: sqlite3.Connectio
             log(f"Error adding column projected_bud_break: {e}")
 
     current_year = datetime.now(timezone.utc).year
-    historical_years = list(range(2012, current_year))
+
+    # Get the oldest year from the readings table instead of hardcoding 2012.
+    try:
+        cursor.execute("SELECT MIN(substr(date, 1, 4)) FROM readings")
+        oldest_year_str = cursor.fetchone()[0]
+        if oldest_year_str is not None:
+            oldest_year = int(oldest_year_str)
+        else:
+            oldest_year = current_year
+    except sqlite3.Error as e:
+        log(f"Error fetching oldest year from readings: {e}")
+        oldest_year = current_year
+
+    historical_years = list(range(oldest_year, current_year))
     try:
         cursor.execute("SELECT variety, heat_summation FROM grapevine_gdd")
         varieties = cursor.fetchall()

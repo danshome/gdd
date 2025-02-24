@@ -996,47 +996,43 @@ def append_forecast_data(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -> No
 
 def project_bud_break_regression(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -> None:
     """
-    Adds a new column 'projected_bud_break' to the 'grapevine_gdd' table if it doesn't already exist
-    and calculates a projected bud break date for each grapevine variety using a linear regression
-    model based on historical data.
+    Executes a process to analyze historical data and forecast projected bud-break dates for grapevine varieties.
+    This is done by performing linear regression on day-of-year (DOY) values where grapevine growth degree
+    days (GDDs) exceed a defined threshold. Predictions are stored in the `grapevine_gdd` table under the
+    `regression_projected_bud_break` column. If the column is non-existent, it will be added automatically.
 
-    This function first ensures the necessary column exists in the database schema. It uses
-    historical growing degree-day (GDD) data to interpolate potential bud break dates for
-    each variety in the current year. The bud break date is estimated by applying a linear
-    regression model to historical years with sufficient data points.
+    The following steps are performed:
+    1. Ensures the `regression_projected_bud_break` column exists in the `grapevine_gdd` table.
+    2. Identifies the range of years using records from the `readings` table.
+    3. For each grapevine variety, calculates regression parameters (slope and intercept)
+       using historical data.
+    4. Applies the regression model to predict the DOY for the current year, converts it into
+       a date, and updates this information to the database.
 
-    :param cursor: Database cursor for executing SQL queries.
+    :param cursor: SQLite database cursor used to execute SQL statements.
     :type cursor: sqlite3.Cursor
-    :param conn: Database connection object to manage transactions.
+    :param conn: SQLite database connection object for committing changes.
     :type conn: sqlite3.Connection
     :return: None
-
-    :raises sqlite3.OperationalError: If an error occurs while altering the database schema or
-                                       executing SQL queries.
-    :raises sqlite3.Error: If any error occurs while retrieving or processing database data.
     """
+    column_name = "regression_projected_bud_break"
     try:
-        execute_sql(cursor, "ALTER TABLE grapevine_gdd ADD COLUMN projected_bud_break TEXT")
+        execute_sql(cursor, f"ALTER TABLE grapevine_gdd ADD COLUMN {column_name} TEXT")
         conn.commit()
-        log("Added column projected_bud_break to grapevine_gdd.")
+        log(f"Added column {column_name} to grapevine_gdd.")
     except sqlite3.OperationalError as e:
-        if "duplicate column name: projected_bud_break" in str(e):
-            log("Column projected_bud_break already exists, skipping addition.")
+        if "duplicate column name" in str(e):
+            log(f"Column {column_name} already exists, skipping addition.")
         else:
-            log(f"Error adding column projected_bud_break: {e}")
+            log(f"Error adding column {column_name}: {e}")
 
     current_year = datetime.now(timezone.utc).year
-
-    # Get the oldest year from the readings table instead of hardcoding 2012.
     try:
         cursor.execute("SELECT MIN(substr(date, 1, 4)) FROM readings")
         oldest_year_str = cursor.fetchone()[0]
-        if oldest_year_str is not None:
-            oldest_year = int(oldest_year_str)
-        else:
-            oldest_year = current_year
+        oldest_year = int(oldest_year_str) if oldest_year_str else current_year
     except sqlite3.Error as e:
-        log(f"Error fetching oldest year from readings: {e}")
+        log(f"Error fetching oldest year: {e}")
         oldest_year = current_year
 
     historical_years = list(range(oldest_year, current_year))
@@ -1051,28 +1047,24 @@ def project_bud_break_regression(cursor: sqlite3.Cursor, conn: sqlite3.Connectio
         if heat_sum is None:
             log(f"Skipping {variety} due to undefined heat_summation.")
             continue
-        data_points = []  # List of (year, bud_break_day-of-year)
+        data_points = []
         for yr in historical_years:
             try:
                 cursor.execute(
                     "SELECT date FROM readings WHERE substr(date, 1, 4)=? AND gdd >= ? ORDER BY date ASC LIMIT 1",
                     (str(yr), heat_sum)
                 )
-            except sqlite3.Error as e:
-                log(f"Error fetching readings for year {yr}: {e}")
-                continue
-            row = cursor.fetchone()
-            if row:
-                try:
+                row = cursor.fetchone()
+                if row:
                     dt = datetime.fromisoformat(row[0].rstrip("Z"))
                     bud_break_doy = dt.timetuple().tm_yday
                     data_points.append((yr, bud_break_doy))
-                except Exception as ex:
-                    log(f"Error parsing date {row[0]} for {variety} in year {yr}: {ex}")
+            except sqlite3.Error as e:
+                log(f"Error fetching readings for year {yr}: {e}")
         if len(data_points) < 2:
-            log(f"Not enough historical data for {variety} to perform regression; skipping.")
+            log(f"Not enough historical data for {variety} in regression model; skipping.")
             continue
-        # Calculate linear regression parameters (slope and intercept)
+
         mean_year = sum(x for x, _ in data_points) / len(data_points)
         mean_doy = sum(y for _, y in data_points) / len(data_points)
         numerator = sum((x - mean_year) * (y - mean_doy) for x, y in data_points)
@@ -1082,12 +1074,139 @@ def project_bud_break_regression(cursor: sqlite3.Cursor, conn: sqlite3.Connectio
         predicted_doy = slope * current_year + intercept
         predicted_doy = max(1, min(366, predicted_doy))
         predicted_date = (datetime(current_year, 1, 1) + timedelta(days=predicted_doy - 1)).date()
-        execute_sql(cursor, """
-            UPDATE grapevine_gdd
-            SET projected_bud_break = ?
-            WHERE variety = ?
+
+        execute_sql(cursor, f"""
+            UPDATE grapevine_gdd SET {column_name} = ? WHERE variety = ?
         """, (predicted_date.isoformat(), variety))
-        log(f"Predicted bud break for {variety} using regression: {predicted_date.isoformat()} (slope: {slope:.2f}, intercept: {intercept:.2f})")
+        log(f"Regression predicted bud break for {variety}: {predicted_date.isoformat()} (slope: {slope:.2f}, intercept: {intercept:.2f})")
+    conn.commit()
+
+
+def project_bud_break_hybrid(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -> None:
+    """
+    Calculates and updates hybrid-projected bud break dates and ranges for grapevine varieties
+    using historical growing degree days (GDD) data and forecasting methods. This process leverages
+    past GDD values for prediction while accounting for variability and forecasts future bud break
+    dates based on accumulated and forecasted GDD values.
+
+    The function also manages database schema changes when necessary by adding required columns
+    if they are absent in the target table. It then iterates through all grapevine
+    varieties stored in the database, calculates the needed parameters, and updates
+    the database with the predicted bud break date and associated confidence range.
+
+    :param cursor: Database cursor for executing SQL queries. Assumes a connection
+        to a database that adheres to the schema described in the function.
+    :type cursor: sqlite3.Cursor
+    :param conn: Active SQLite database connection object used for committing changes
+        to the database after successful completion of updates.
+    :type conn: sqlite3.Connection
+    :return: This function does not return a value; output is written directly to the
+        database and logged through the logging system.
+    :rtype: None
+    :raises sqlite3.OperationalError: Raised when a SQL operation fails, such as
+        schema modifications or queries, caused by database issues.
+    """
+    for col in ["hybrid_projected_bud_break", "hybrid_bud_break_range"]:
+        try:
+            execute_sql(cursor, f"ALTER TABLE grapevine_gdd ADD COLUMN {col} TEXT")
+            conn.commit()
+            log(f"Added column {col} to grapevine_gdd.")
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" in str(e):
+                log(f"Column {col} already exists, skipping addition.")
+            else:
+                log(f"Error adding column {col}: {e}")
+
+    current_date = datetime.now(timezone.utc).date()
+    current_year = current_date.year
+
+    cursor.execute("SELECT DISTINCT substr(date, 1, 4) AS year FROM readings ORDER BY year ASC")
+    years = [int(row[0]) for row in cursor.fetchall()]
+    historical_years = [y for y in years if y < current_year]
+
+    cursor.execute("SELECT variety, heat_summation FROM grapevine_gdd")
+    varieties = cursor.fetchall()
+
+    for variety, heat_sum in varieties:
+        if heat_sum is None:
+            log(f"Skipping {variety} due to undefined heat_summation.")
+            continue
+
+        bud_break_gdd = []
+        bud_break_doys = []
+        for yr in historical_years:
+            cursor.execute(
+                "SELECT date, gdd FROM readings WHERE substr(date, 1, 4)=? AND gdd >= ? ORDER BY date ASC LIMIT 1",
+                (str(yr), heat_sum)
+            )
+            row = cursor.fetchone()
+            if row:
+                dt = datetime.fromisoformat(row[0].rstrip("Z"))
+                bud_break_doys.append(dt.timetuple().tm_yday)
+                bud_break_gdd.append(row[1])
+
+        if len(bud_break_gdd) < 1:
+            log(f"Not enough historical data for {variety} in hybrid model; skipping.")
+            continue
+
+        target_gdd = sorted(bud_break_gdd)[len(bud_break_gdd) // 2]
+        doy_std = (sum((d - sum(bud_break_doys) / len(bud_break_doys)) ** 2 for d in bud_break_doys) / len(bud_break_doys)) ** 0.5
+
+        cursor.execute(
+            "SELECT MAX(gdd) FROM readings WHERE substr(date, 1, 4)=? AND date <= ?",
+            (str(current_year), current_date.isoformat())
+        )
+        current_gdd = cursor.fetchone()[0] or 0
+
+        forecast_end = (current_date + timedelta(days=14)).isoformat()
+        cursor.execute(
+            "SELECT MAX(gdd) FROM readings WHERE substr(date, 1, 4)=? AND date <= ?",
+            (str(current_year), forecast_end)
+        )
+        end_gdd = cursor.fetchone()[0] or current_gdd
+        forecast_gdd = max(0, end_gdd - current_gdd)
+        total_gdd = current_gdd + forecast_gdd
+
+        remaining_gdd = max(0, target_gdd - total_gdd)
+        if remaining_gdd == 0:
+            cursor.execute(
+                "SELECT date FROM readings WHERE substr(date, 1, 4)=? AND gdd >= ? ORDER BY date ASC LIMIT 1",
+                (str(current_year), target_gdd)
+            )
+            row = cursor.fetchone()
+            predicted_date = datetime.fromisoformat(row[0].rstrip("Z")).date() if row else current_date + timedelta(days=14)
+        else:
+            historical_rates = []
+            for yr, doy in zip(historical_years, bud_break_doys):
+                start_date = datetime(yr, 1, 1) + timedelta(days=(current_date.timetuple().tm_yday - 1))
+                cursor.execute(
+                    "SELECT gdd FROM readings WHERE substr(date, 1, 4)=? AND date <= ? ORDER BY date DESC LIMIT 1",
+                    (str(yr), start_date.isoformat())
+                )
+                start_gdd = cursor.fetchone()[0] or 0
+                days_diff = doy - start_date.timetuple().tm_yday
+                rate = (bud_break_gdd[historical_years.index(yr)] - start_gdd) / days_diff if days_diff > 0 else 2.0
+                if rate > 0:
+                    historical_rates.append(rate)
+            avg_daily_gdd = sum(historical_rates) / len(historical_rates) if historical_rates else 2.0
+            days_remaining = min(remaining_gdd / avg_daily_gdd, 90)
+            predicted_date = current_date + timedelta(days=14 + days_remaining)
+
+        log(f"{variety}: heat_sum={heat_sum}, target_gdd={target_gdd}, current_gdd={current_gdd}, "
+            f"forecast_gdd={forecast_gdd}, remaining_gdd={remaining_gdd}, avg_daily_gdd={avg_daily_gdd}, "
+            f"days_remaining={days_remaining}")
+
+        predicted_doy = predicted_date.timetuple().tm_yday
+        range_start = max(1, predicted_doy - doy_std)
+        range_end = min(366, predicted_doy + doy_std)
+        range_start_date = (datetime(current_year, 1, 1) + timedelta(days=range_start - 1)).isoformat()
+        range_end_date = (datetime(current_year, 1, 1) + timedelta(days=range_end - 1)).isoformat()
+        range_str = f"{range_start_date},{range_end_date}"
+
+        execute_sql(cursor, """
+            UPDATE grapevine_gdd SET hybrid_projected_bud_break = ?, hybrid_bud_break_range = ? WHERE variety = ?
+        """, (predicted_date.isoformat(), range_str, variety))
+        log(f"Hybrid predicted bud break for {variety}: {predicted_date.isoformat()} (±{doy_std:.1f} days)")
     conn.commit()
 
 
@@ -1310,6 +1429,7 @@ def main() -> None:
     log("Performing final full recalculation of cumulative, hourly, and daily GDD...")
     recalc_gdd(cursor, conn, full=True)
     project_bud_break_regression(cursor, conn)
+    project_bud_break_hybrid(cursor, conn)
     log("Data retrieval complete.")
     conn.close()
 

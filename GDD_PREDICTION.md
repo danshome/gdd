@@ -1,96 +1,101 @@
 # GDD Prediction and Bud Break Projection
 
-This document explains the methodology and implementation details behind the bud break prediction in our project. In our model, we use historical regression to predict when each grapevine variety will break bud. This approach is based on the idea that bud break occurs when the vine’s cumulative Growing Degree Days (GDD) (calculated from January 1) reaches a specific threshold value (the "heat_summation" defined per variety). By analyzing historical data, we can derive a trend and then apply it to predict the current year’s bud break date.
+This document explains the methodology and implementation details behind the bud break prediction in our project. We use three prediction models: **historical regression**, **hybrid modeling**, and an **enhanced EHML model** to determine when each grapevine variety will break bud. These models leverage historical Growing Degree Days (GDD) data, real-time accumulation, and machine learning techniques to improve prediction accuracy.
 
-## Overview
+## Overview of Prediction Models
 
-The function **`project_bud_break_regression()`** in `gdd.py` predicts the bud break date for each grape variety using a multi-year regression approach. For each variety, it:
+### 1. Regression-Based Projection
+The function **`project_bud_break_regression()`** predicts the bud break date for each grape variety using a linear regression approach. The methodology follows these steps:
 
-1. **Collects Historical Bud Break Data:**  
-   - For each year (from 2012 to the year prior to the current year), the function finds the first date when the cumulative GDD reaches or exceeds the variety’s required threshold (heat_summation).
-   
-2. **Converts Dates to Day-of-Year (DOY):**  
-   - Each bud break date is converted to a numerical day-of-year (DOY) value (e.g., March 1 is approximately DOY 60 in a non-leap year).
+1. **Ensures the `regression_projected_bud_break` column exists** in the `grapevine_gdd` table. If missing, the function adds it automatically.
+2. **Collects Historical Bud Break Data**  
+   - For each year (from the oldest available year to the prior year), the function finds the first date when the cumulative GDD reaches or exceeds the variety’s required threshold (`heat_summation`).
+3. **Converts Bud Break Dates to Day-of-Year (DOY):**  
+   - Each bud break date is converted into a numerical day-of-year (DOY) value.
+4. **Performs Linear Regression:**  
+   - The regression equation is derived using:
 
-3. **Performs Linear Regression:**  
-   - A simple linear regression is performed with:
-     - **x:** Year
-     - **y:** Bud break DOY  
-   - The regression determines a slope (the rate of change in DOY per year) and an intercept.
+     $$\text{slope} = \frac{\sum (x - \bar{x})(y - \bar{y})}{\sum (x - \bar{x})^2}$$
 
-4. **Predicts the Current Year’s Bud Break DOY:**  
-   - The current year is inserted into the regression equation to calculate the predicted DOY:
+     $$\text{intercept} = \bar{y} - \text{slope} \times \bar{x}$$
+
+     where:
+     - $\bar{x}$ is the average of the years.
+     - $\bar{y}$ is the average of the bud break DOY values.
+
+5. **Predicts the Current Year’s Bud Break DOY:**  
+   - Using the regression equation:
+
      $$\text{predicted\_DOY} = \text{slope} \times (\text{current year}) + \text{intercept}$$
-   - The predicted DOY is bounded between 1 and 366.
 
-5. **Converts the Predicted DOY Back to a Calendar Date:**  
-   - Using January 1 of the current year as the base, the predicted DOY is converted to a calendar date.
+   - The value is constrained between 1 and 366.
+6. **Converts the Predicted DOY Back to a Calendar Date**
+7. **Updates the Database** with the predicted bud break date under `regression_projected_bud_break`.
 
-6. **Updates the Database:**  
-   - The predicted bud break date is stored in the `grapevine_gdd` table (in the `projected_bud_break` column) for the corresponding grape variety.
+### 2. Hybrid Projection Model
+The function **`project_bud_break_hybrid()`** refines predictions by integrating **historical and real-time GDD trends**. This method:
 
-## Detailed Methodology
+1. **Determines the Median-Based Target GDD Threshold**
+   - The median GDD value at bud break from historical data is used as the target.
+2. **Calculates Forecasted GDD Accumulation**  
+   - The function retrieves accumulated GDD from the database.
+   - It predicts **the next 14 days of GDD accumulation** and adds it to the current total.
+   - The remaining GDD required to reach bud break is computed.
+3. **Estimates the Bud Break Date** using the formula:
 
-### 1. Historical Data Collection
+     $$\text{days\_remaining} = \frac{\text{remaining\_GDD}}{\text{avg\_daily\_GDD}}$$
 
-For each grape variety, the function queries the `readings` table for each historical year (from 2012 until the previous year). It searches for the first reading (chronologically) where the cumulative GDD (accumulated from January 1) reaches or exceeds the variety’s defined threshold (stored in the `heat_summation` field).
+   - Historical GDD rates determine the expected daily GDD accumulation.
+   - The predicted date is calculated by adding `days_remaining` to the current date.
+4. **Computes Confidence Range:**
+   - The standard deviation of historical bud break DOY values ($\sigma$) is used:
 
-### 2. Conversion to Day-of-Year (DOY)
+     $$\text{range\_start} = \max(1, \text{predicted\_DOY} - \sigma)$$
 
-Once the first date of bud break is determined for a given year, the function converts this date into a DOY value using Python’s datetime utilities. This standardizes the data so that we can compare bud break timing across different years.
+     $$\text{range\_end} = \min(366, \text{predicted\_DOY} + \sigma)$$
 
-### 3. Linear Regression
+5. **Updates the Database** with the projected bud break date and range under `hybrid_projected_bud_break` and `hybrid_bud_break_range`.
 
-With a set of historical (year, bud_break_DOY) pairs, the function performs a simple linear regression. The formulas used are:
+### 3. Enhanced EHML "Extreme Heat Machine Learning" Model
+The function **`project_bud_break_ehml()`** applies an **XGBoost regression model trained on 25 years of temperature data at 5-second intervals**. This method:
 
-- **Slope:**
-  $$\text{slope} = \frac{\sum (x - \bar{x})(y - \bar{y})}{\sum (x - \bar{x})^2}$$
+1. **Accounts for Variability in Chill Hours and GDD Accumulation**  
+   - Full-season chill hours (from September 1 to March 1) are calculated.
+   - Historical chill hours are averaged to estimate the current year's chill.
+2. **Builds a Machine Learning Model with the Following Features:**
+   - **Current accumulated GDD**
+   - **Day of the year (DOY)**
+   - **Estimated chill hours**
+   - **Historical GDD statistics (mean and standard deviation)**
+3. **Trains an XGBoost Regression Model**
+   - The model is trained on historical data to predict the remaining GDD required for bud break.
+4. **Predicts the Bud Break Date Using a Dynamic GDD Accumulation Rate:**
+   - A **30-day rolling average GDD rate** is calculated from historical records.
+   - The remaining GDD is divided by this rate to estimate the number of days required to reach bud break:
 
-- **Intercept:**
-  $$\text{intercept} = \bar{y} - \text{slope} \times \bar{x}$$
+     $$\text{days\_remaining} = \frac{\text{remaining\_GDD}}{\text{avg\_daily\_GDD}}$$
 
-Where:
--  $\bar{x}$ is the average of the years.
--  $\bar{y}$  is the average of the bud break DOY values.
+   - The bud break date is determined accordingly.
+5. **Updates the Database**
+   - The predicted bud break date is stored under `ehml_projected_bud_break`.
 
-A negative slope implies that bud break is occurring earlier over time, which is consistent with trends under climate warming.
+## Key Updates Based on Code Review
 
-### 4. Prediction for the Current Year
+1. **Regression Model Enhancements:**
+   - Added handling for cases where there is insufficient historical data.
+   - Now ensures predicted DOY values remain within valid date ranges (1-366).
 
-The current year is plugged into the regression equation:
-$$\text{predicted\_DOY} = \text{slope} \times (\text{current year}) + \text{intercept}$$
-This gives us the bud break DOY for the current year. The value is then clamped between 1 and 366 to ensure it is valid.
+2. **Hybrid Model Adjustments:**
+   - Now factors in **real-time GDD accumulation and 14-day forecasted GDD trends**.
+   - Uses **historical bud break DOY variance** to estimate confidence intervals.
 
-### 5. Conversion to Calendar Date
-
-The numerical DOY is converted back into a calendar date by taking January 1 of the current year and adding the appropriate number of days (predicted_DOY - 1).
-
-### 6. Updating the Database
-
-The predicted calendar date is then stored in the `grapevine_gdd` table for the respective variety under the column `projected_bud_break`.
-
-## Example Log Output
-
-Example log messages produced by the function might be:
-```
-[2025-02-13 06:27:31.930] Predicted bud break for Chardonnay using regression: 2025-03-26 (slope: -0.41, intercept: 908.74)
-[2025-02-13 06:27:35.947] Predicted bud break for Tempranillo using regression: 2025-03-27 (slope: -0.41, intercept: 920.59)
-...
-```
-These outputs indicate the regression parameters and the final predicted bud break date for each variety.
-
-## Rationale
-
-The regression-based approach leverages long-term historical observations to capture trends in bud break timing. Rather than simply calculating a current accumulation rate, this method:
-- Accounts for interannual variability and gradual shifts (e.g., due to climate change).
-- Provides a more robust, trend-based prediction that aligns better with historical data.
-- Helps adjust for the fact that simple GDD accumulation (starting from January 1) might not accurately capture the onset of bud break if early-year temperatures contribute little to effective heat accumulation.
+3. **EHML Model Refinements:**
+   - Introduces a **machine learning model trained on 25 years of temperature data**.
+   - Uses **dynamic GDD accumulation rates instead of static estimates**.
+   - Implements a **30-day rolling average for improved accuracy**.
 
 ## Future Considerations
 
-- **Model Refinement:**  
-  Future iterations could incorporate additional factors (e.g., chilling requirements, photoperiod) or weighted regression to further refine predictions.
-- **Validation:**  
-  Continually validating the regression predictions with new phenological observations will help adjust the model as conditions change.
-- **Hybrid Approaches:**  
-  Combining this regression trend with real-time GDD accumulation data could yield an even more robust prediction model.
+- **Further model refinement** by incorporating additional environmental factors (e.g., precipitation, soil moisture).
+- **Validation with new data points** to improve predictive accuracy.
+- **Integration of real-time weather forecasts** to refine predictions dynamically.

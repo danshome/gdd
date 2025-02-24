@@ -95,6 +95,62 @@ The processed data powers an interactive dashboard (`index.html`) hosted locally
    Run: `python gdd.py`
    This populates the database with historical data, forecasts, and bud break predictions.
 
+## GitHub Actions and DVC Setup
+
+This project includes an optional GitHub Actions workflow (`CI.yml`) for automating data updates and syncing the SQLite database with a DVC remote on Google Drive. This is not required unless you want to use GitHub Actions for continuous integration. Without it, running `gdd.py` locally will build a clean `ambient_weather.sqlite` database from scratch.
+
+### Prerequisites for CI (Optional)
+
+- *DVC*: Install DVC (`pip install dvc`) and its Google Drive extension (`pip install dvc[gdrive]`) if using CI.
+- *Google Drive Remote*: A Google Drive folder to store the `ambient_weather.sqlite` database (for CI only).
+- *GitHub Repository*: Push access to your repo for committing DVC changes (for CI only).
+
+### DVC Configuration (Optional)
+
+1. *Initialize DVC* (if using CI):
+   Run: `dvc init`
+   This creates a `.dvc` directory.
+
+2. *Add the SQLite Database to DVC*:
+   Run: `dvc add ambient_weather.sqlite`
+   This generates `ambient_weather.sqlite.dvc` for tracking.
+
+3. *Configure DVC Remote*:
+   - Add a Google Drive remote: `dvc remote add -d myremote gdrive://your-folder-id`
+   - Replace `your-folder-id` with your Google Drive folder ID (from the folder’s URL).
+
+4. *Set Up Service Account* (for CI):
+   - Create a Google Cloud service account with access to your Drive folder.
+   - Download the JSON key file (e.g., `service_account.json`).
+   - Configure DVC: `dvc remote modify myremote gdrive_use_service_account true`
+   - Set the file path: `dvc remote modify --local myremote gdrive_service_account_json_file_path service_account.json`
+   - Specify the user email: `dvc remote modify myremote gdrive_service_account_user_email your-email@example.com`
+
+### GitHub Secrets (Optional)
+
+For CI, add these secrets in your GitHub repository settings (`Settings > Secrets and variables > Actions > Secrets`):
+- *GDRIVE_FOLDER_ID*: Your Google Drive folder ID (e.g., `1aBcDeFgHiJkLmNoPqRsTuVwXyZ`).
+- *GDRIVE_CLIENT_ID*: Client ID from Google Cloud OAuth 2.0 credentials (optional if using service account).
+- *GDRIVE_CLIENT_SECRET*: Client secret from Google Cloud OAuth 2.0 credentials (optional if using service account).
+- *GDRIVE_SERVICE_ACCOUNT*: Base64-encoded service account JSON key (generate with `base64 service_account.json` locally).
+- *GITHUB_TOKEN*: Automatically provided by GitHub Actions.
+
+### Enabling the Workflow (Optional)
+
+1. Push `.github/workflows/CI.yml` to your `main` branch.
+2. The workflow triggers on:
+   - Push to `main`
+   - Pull requests to `main`
+   - Manual dispatch via the GitHub Actions tab.
+3. It will:
+   - Install Python and dependencies.
+   - Pull the database with DVC.
+   - Run `gdd.py` to update data.
+   - Commit changes to `ambient_weather.sqlite.dvc`.
+   - Push the updated database to Google Drive.
+
+If you’re not using CI, skip this section—running `gdd.py` locally builds a fresh database without DVC or GitHub Actions.
+
 ## Usage
 
 1. *Launch the Dashboard*:

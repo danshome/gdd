@@ -117,7 +117,7 @@ The processed data powers an interactive dashboard (`index.html`) hosted locally
   - Fetches 5-minute weather data, interpolates gaps, and appends 14-day forecasts.
   - Calculates GDD incrementally (5-min intervals) and fully for accuracy.
   - Integrates sunspot and pest data from CSV files.
-- *Prediction Models*:
+- *Prediction Models*: – see [GDD_PREDICTION.md](GDD_PREDICTION.md) for details.
   - *Linear DOY Regression*: Fits a trend line to historical bud break DOYs.
   - *Median GDD Ensemble*: Combines median GDD targets with forecast-adjusted rates.
   - *EHML*: Trains XGBoost on features (current GDD, DOY, chill hours, GDD stats) for remaining GDD prediction, dynamically accumulated.
@@ -141,4 +141,4 @@ Contributions are welcome! Fork the repo, submit pull requests, or open issues f
 MIT License – see [LICENSE](LICENSE) for details.
 
 ---
-Built by [Your Name] for viticulture research and management.
+Built by Robert Clay Vineyards for viticulture research and management.

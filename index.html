@@ -157,6 +157,20 @@
             pointer-events: none;
             z-index: 2000;
         }
+
+        /* Dropdown styling */
+        #modelSelectContainer {
+            text-align: center;
+            margin: 10px 0;
+        }
+
+        #modelSelect {
+            padding: 5px;
+            font-size: 16px;
+            border-radius: 4px;
+            background-color: #f0f0f0;
+            border: 1px solid #ccc;
+        }
     </style>
     <script>
         // Register the ChartDataLabels plugin
@@ -171,6 +185,15 @@
     <a href="https://ambientweather.net/">ambientweather.net</a> &
     <a href="https://open-meteo.com/en/docs/historical-weather-api">Open-Meteo</a>
 </h3>
+<!-- Model Selection Dropdown -->
+<div id="modelSelectContainer">
+    <label for="modelSelect">Prediction Model: </label>
+    <select id="modelSelect">
+        <option value="linearDOYRegression" selected>Linear DOY Regression</option>
+        <option value="medianGDDEnsemble">Median GDD Ensemble</option>
+        <option value="mlMultivariateGDD">Extreme Heat Machine Learning</option>
+    </select>
+</div>
 <!-- Toggle buttons for slide-out panels -->
 <button id="toggleLeftPanel">Toggle Months</button>
 <button id="toggleRightPanel">Toggle Years</button>
@@ -240,6 +263,9 @@
 <!-- Tooltip element for vertical line labels -->
 <div id="vlineTooltip"></div>
 <script>
+    // Register the ChartDataLabels plugin
+    Chart.register(ChartDataLabels);
+
     // Global auto-refresh settings
     let autoRefresh = true;
     let refreshIntervalId = null;
@@ -366,6 +392,8 @@
             .filter(cb => cb.checked)
             .map(cb => cb.value);
         localStorage.setItem("selectedYears", JSON.stringify(selYears));
+        const modelSelect = document.getElementById("modelSelect");
+        localStorage.setItem("selectedModel", modelSelect.value);
     }
 
     function loadFilterSettings() {
@@ -388,6 +416,10 @@
             const allChecked = Array.from(document.querySelectorAll("input[name='year']")).every(cb => cb.checked);
             const allYearsCb = document.getElementById("allYears");
             if (allYearsCb) allYearsCb.checked = allChecked;
+        }
+        const storedModel = localStorage.getItem("selectedModel");
+        if (storedModel) {
+            document.getElementById("modelSelect").value = storedModel;
         }
     }
 
@@ -456,8 +488,8 @@
     }
 
     // Initialize sql.js and load the database
-    initSqlJs({locateFile: file => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.12.0/${file}`})
-        .then(function (SQLLib) {
+    initSqlJs({ locateFile: file => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.12.0/${file}` })
+        .then(function(SQLLib) {
             SQL = SQLLib;
             return fetch(DB_FILENAME);
         })
@@ -469,8 +501,10 @@
             loadFilterSettings();
             refreshData();
             startAutoRefresh();
+
+            // Event listeners for year checkboxes
             document.querySelectorAll("input[name='year']").forEach(cb => {
-                cb.addEventListener("change", function () {
+                cb.addEventListener("change", function() {
                     let allChecked = true;
                     document.querySelectorAll("input[name='year']").forEach(box => {
                         if (!box.checked) {
@@ -483,9 +517,11 @@
                     loadAndPlotData();
                 });
             });
+
+            // Event listener for "All Years" checkbox
             const allYearsCb = document.getElementById("allYears");
             if (allYearsCb) {
-                allYearsCb.addEventListener("change", function () {
+                allYearsCb.addEventListener("change", function() {
                     const newState = this.checked;
                     document.querySelectorAll("input[name='year']").forEach(cb => {
                         cb.checked = newState;
@@ -494,8 +530,10 @@
                     loadAndPlotData();
                 });
             }
+
+            // Event listeners for month checkboxes
             document.querySelectorAll("input[name='month']").forEach(cb => {
-                cb.addEventListener("change", function () {
+                cb.addEventListener("change", function() {
                     let allChecked = true;
                     document.querySelectorAll("input[name='month']").forEach(box => {
                         if (!box.checked) {
@@ -508,9 +546,11 @@
                     loadAndPlotData();
                 });
             });
+
+            // Event listener for "All Months" checkbox
             const allMonthsCb = document.getElementById("allMonths");
             if (allMonthsCb) {
-                allMonthsCb.addEventListener("change", function () {
+                allMonthsCb.addEventListener("change", function() {
                     const newState = this.checked;
                     document.querySelectorAll("input[name='month']").forEach(cb => {
                         cb.checked = newState;
@@ -519,7 +559,9 @@
                     loadAndPlotData();
                 });
             }
-            document.getElementById("autoRefreshCheckbox").addEventListener("change", function () {
+
+            // Event listener for auto-refresh checkbox
+            document.getElementById("autoRefreshCheckbox").addEventListener("change", function() {
                 autoRefresh = this.checked;
                 log("Auto Refresh is now " + (autoRefresh ? "enabled" : "disabled"));
                 if (autoRefresh) {
@@ -528,7 +570,14 @@
                     stopAutoRefresh();
                 }
             });
-        }).catch(err => console.error("Error initializing database:", err));
+
+            // Event listener for model selection dropdown
+            document.getElementById("modelSelect").addEventListener("change", function() {
+                saveFilterSettings();
+                loadAndPlotData();
+            });
+        })
+        .catch(err => console.error("Error initializing database:", err));
 
     function generateDistinctColor(index, total) {
         const hue = Math.floor((360 / total) * index);
@@ -1065,35 +1114,49 @@
                 ds.hidden = true;
             }
         });
-        // Add vertical lines for both regression and hybrid model predictions
+        // Add vertical lines for selected prediction model
         let verticalLines = [];
         const currentYear = String(new Date().getFullYear());
         if (selectedYears.includes(currentYear)) {
-            const res = db.exec("SELECT variety, regression_projected_bud_break, hybrid_projected_bud_break FROM grapevine_gdd");
+            const selectedModel = document.getElementById("modelSelect").value;
+            let columnName;
+            let dashPattern;
+            let labelSuffix;
+            switch (selectedModel) {
+                case "linearDOYRegression":
+                    columnName = "regression_projected_bud_break";
+                    dashPattern = [5, 5]; // Dashed line for Linear DOY Regression
+                    labelSuffix = " (Linear DOY Regression)";
+                    break;
+                case "medianGDDEnsemble":
+                    columnName = "hybrid_projected_bud_break";
+                    dashPattern = []; // Solid line for Median GDD Ensemble
+                    labelSuffix = " (Median GDD Ensemble)";
+                    break;
+                case "mlMultivariateGDD":
+                    columnName = "ehml_projected_bud_break";
+                    dashPattern = [10, 3]; // Dash-dot for ML Multivariate GDD
+                    labelSuffix = " (ML Multivariate GDD)";
+                    break;
+                default:
+                    columnName = "regression_projected_bud_break";
+                    dashPattern = [5, 5];
+                    labelSuffix = " (Linear DOY Regression)";
+            }
+            const res = db.exec(`SELECT variety, ${columnName} FROM grapevine_gdd`);
             if (res.length > 0) {
                 res[0].values.forEach(row => {
                     const variety = row[0];
-                    const regPredicted = row[1];
-                    const hybridPredicted = row[2];
+                    const predicted = row[1];
                     const varietyColor = getColorForVariety(variety);
-                    if (regPredicted && regPredicted.startsWith(currentYear)) {
-                        const xLabel = regPredicted.substring(5);
-                        verticalLines.push({
-                            xLabel: xLabel,
-                            color: lightenColor(varietyColor, 0.3),
-                            label: variety + " Bud Break (Regression)",
-                            lineWidth: 2,
-                            dashPattern: [5, 5] // Dashed line for regression
-                        });
-                    }
-                    if (hybridPredicted && hybridPredicted.startsWith(currentYear)) {
-                        const xLabel = hybridPredicted.substring(5);
+                    if (predicted && predicted.startsWith(currentYear)) {
+                        const xLabel = predicted.substring(5);
                         verticalLines.push({
                             xLabel: xLabel,
                             color: varietyColor,
-                            label: variety + " Bud Break (Hybrid)",
+                            label: variety + " Bud Break" + labelSuffix,
                             lineWidth: 2,
-                            dashPattern: [] // Solid line for hybrid
+                            dashPattern: dashPattern
                         });
                     }
                 });
@@ -1110,7 +1173,7 @@
                 plugins: {
                     title: {
                         display: true,
-                        text: "Daily Avg Temp (with Min/Max Band, Trend & Actual), Cumulative GDD, Daily Rain, Bud Break, & Pest Spray"
+                        text: "Daily Avg Temp (with Min/Max Band, Trend & Actual), Cumulative GDD, Daily Rain, Bud Break"
                     },
                     legend: {display: false},
                     verticalLinePlugin: {lines: verticalLines},
@@ -1234,6 +1297,7 @@
             loadAndPlotData();
         }
     });
+
     document.getElementById("nnThreshold").addEventListener("change", function () {
         if (document.getElementById("modeSelect").value === "nearest") {
             applyNearestNeighborMode();
@@ -1282,11 +1346,13 @@
         leftPanel.classList.toggle("hidden");
         setTimeout(() => window.dispatchEvent(new Event('resize')), 350);
     });
+
     document.getElementById("toggleRightPanel").addEventListener("click", function () {
         const rightPanel = document.getElementById("rightPanel");
         rightPanel.classList.toggle("hidden");
         setTimeout(() => window.dispatchEvent(new Event('resize')), 350);
     });
+
     window.addEventListener("resize", function () {
         if (dailyChart) dailyChart.resize();
     });

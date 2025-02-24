@@ -17,7 +17,6 @@ All functions are documented, and complex sections include inline comments for c
 """
 
 import configparser
-import os
 import sqlite3
 import sys
 import time
@@ -27,6 +26,12 @@ import csv
 from io import StringIO
 from datetime import datetime, timedelta, timezone
 import pandas as pd
+import xgboost as xgb
+import numpy as np
+from sklearn.model_selection import cross_val_score
+import pickle
+import os
+
 
 # --- Constants ---
 CONFIG_FILE = "config.ini"
@@ -76,8 +81,7 @@ def log(message: str) -> None:
     :type message: str
     :return: None
     """
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-    print(f"[{now}] {message}")
+    print(f"[{datetime.now().isoformat()}] {message}")
 
 
 def log_debug(message: str) -> None:
@@ -327,6 +331,9 @@ def create_tables(conn: sqlite3.Connection, cursor: sqlite3.Cursor) -> None:
     execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_readings_year ON readings((substr(date, 1, 4)));")
     execute_sql(cursor,
                 "CREATE INDEX IF NOT EXISTS idx_readings_month ON readings((cast(substr(date, 6, 2) as integer)));")
+    execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_readings_date ON readings (date);")
+    execute_sql(cursor,
+                "CREATE INDEX IF NOT EXISTS idx_readings_year_date_gdd ON readings (substr(date, 1, 4), date, gdd);")
     conn.commit()
 
     # Create the grapevine_gdd table
@@ -650,6 +657,97 @@ def recalc_gdd(cursor: sqlite3.Cursor, conn: sqlite3.Connection, full: bool = Fa
     else:
         log("Incremental GDD recalculation complete.")
 
+def calculate_chill_hours(cursor: sqlite3.Cursor, start_date: datetime, end_date: datetime, threshold: float = 45) -> float:
+    """
+    Calculate the number of chill hours within a specified date range.
+    Chill hours are calculated based on the number of 5-minute intervals within
+    the provided date range where the temperature falls below a given threshold.
+
+    :param cursor: A database cursor object used to execute SQL queries.
+    :type cursor: sqlite3.Cursor
+    :param start_date: The start of the date range in datetime format.
+    :type start_date: datetime
+    :param end_date: The end of the date range in datetime format.
+    :type end_date: datetime
+    :param threshold: The temperature threshold in Fahrenheit for determining chill hours.
+        Default is 45.
+    :type threshold: float
+    :return: The total number of chill hours (as a float) calculated by summing up
+        applicable 5-minute intervals and converting the time to hours.
+    :rtype: float
+    """
+    cursor.execute(
+        "SELECT COUNT(*) FROM readings WHERE date >= ? AND date <= ? AND tempf < ?",
+        (start_date.isoformat(), end_date.isoformat(), threshold)
+    )
+    chill_intervals = cursor.fetchone()[0]  # Number of 5-minute intervals
+    chill_hours = chill_intervals * (5 / 60)  # Convert to hours
+    return chill_hours
+
+def calculate_historical_gdds(cursor: sqlite3.Cursor, years: list, doy: int) -> list:
+    """
+    Calculate historical Growing Degree Days (GDDs) up to a specific day of the year for multiple years.
+
+    This function queries a SQLite database, retrieves the maximum GDD values up to a given day of
+    the year for each year in the provided list, and returns these values in a list.
+
+    :param cursor: Database cursor used to execute SQLite queries.
+    :type cursor: sqlite3.Cursor
+    :param years: List of years for which GDD calculations are performed.
+    :type years: list
+    :param doy: Day of the year (starting from 1) up to which GDD is calculated for each year.
+    :type doy: int
+    :return: A list containing the maximum GDD values for each year in the given range. If no GDD
+             values are found for a year, a 0 is added to the list for that year.
+    :rtype: list
+    """
+    historical_gdds = []
+    for year in years:
+        target_date = datetime(year, 1, 1) + timedelta(days=doy - 1)
+        cursor.execute(
+            "SELECT MAX(gdd) FROM readings WHERE substr(date, 1, 4)=? AND date <= ?",
+            (str(year), target_date.isoformat())
+        )
+        gdd = cursor.fetchone()[0]
+        historical_gdds.append(gdd if gdd is not None else 0)
+    return historical_gdds
+
+def calculate_avg_daily_gdd(cursor: sqlite3.Cursor, years: list, current_date: datetime) -> float:
+    """
+    Calculates the average daily Growing Degree Days (GDD) rate over a 14-day window
+    around the `current_date` for the given years using the provided database cursor.
+    GDD is a measure often used in agriculture to estimate plant development rates.
+    This function retrieves maximum and minimum GDD values from the database for
+    the 14-day window and computes the average daily difference for each year provided.
+    If no data is available, a default rate of 2.0 GDD/day is returned.
+
+    :param cursor:
+        The database cursor to execute queries. Expected to support standard
+        SQLite operations.
+    :param years:
+        A list of integer years for which the average daily GDD is to be calculated.
+    :param current_date:
+        A datetime object representing the date around which the 14-day window is
+        centered.
+    :return:
+        The average of daily GDD rates calculated over the given years. If no data
+        is available for any year, a default rate of 2.0 GDD/day is returned.
+    :rtype:
+        float
+    """
+    rates = []
+    for year in years:
+        start_date = datetime(year, current_date.month, current_date.day)
+        end_date = start_date + timedelta(days=14)  # Use a 14-day window
+        cursor.execute(
+            "SELECT MAX(gdd), MIN(gdd) FROM readings WHERE substr(date, 1, 4)=? AND date BETWEEN ? AND ?",
+            (str(year), start_date.isoformat(), end_date.isoformat())
+        )
+        max_gdd, min_gdd = cursor.fetchone()
+        if max_gdd and min_gdd:
+            rate = (max_gdd - min_gdd) / 14
+            rates.append(rate)
+    return sum(rates) / len(rates) if rates else 2.0  # Default to 2 GDD/day if no data
 
 def fetch_day_data(mac_address: str, end_date: str) -> any:
     """
@@ -1209,6 +1307,257 @@ def project_bud_break_hybrid(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -
         log(f"Hybrid predicted bud break for {variety}: {predicted_date.isoformat()} (±{doy_std:.1f} days)")
     conn.commit()
 
+def project_bud_break_ehml(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -> None:
+    """
+    Projects bud break dates using an enhanced EHML model with 25 years of temperature data at 5-second intervals.
+    Uses dynamic GDD accumulation based on historical averages for accurate date predictions.
+
+    :param cursor: SQLite database cursor for executing queries.
+    :param conn: SQLite database connection object for committing changes.
+    :return: None
+    """
+    log("Starting EHML bud break projection.")
+
+    # Define prediction column
+    column_name = "ehml_projected_bud_break"
+    try:
+        cursor.execute(f"ALTER TABLE grapevine_gdd ADD COLUMN {column_name} TEXT")
+        conn.commit()
+        log(f"Added column {column_name} to grapevine_gdd.")
+    except sqlite3.OperationalError as e:
+        if "duplicate column name" in str(e):
+            log(f"Column {column_name} already exists, skipping.")
+        else:
+            log(f"Error adding column: {e}")
+
+    # Create training data table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS ehml_training_data (
+            variety TEXT,
+            year INTEGER,
+            current_gdd REAL,
+            doy INTEGER,
+            chill_hours REAL,
+            mean_gdd REAL,
+            std_gdd REAL,
+            remaining_gdd REAL,
+            PRIMARY KEY (variety, year)
+        )
+    """)
+    conn.commit()
+
+    # Current date info
+    current_date = datetime.now().date()
+    current_year = current_date.year
+    doy = current_date.timetuple().tm_yday
+    log(f"Current date: {current_date}, DOY: {doy}, Year: {current_year}")
+
+    # Fetch historical years
+    cursor.execute("""
+        SELECT DISTINCT CAST(substr(date, 1, 4) AS INTEGER) AS year 
+        FROM readings 
+        WHERE CAST(substr(date, 1, 4) AS INTEGER) < ? 
+        ORDER BY year ASC
+    """, (current_year,))
+    historical_years = [row[0] for row in cursor.fetchall()]
+    log(f"Found {len(historical_years)} historical years.")
+
+    if not historical_years:
+        log("Error: No historical years found.")
+        return
+
+    # Fetch varieties
+    cursor.execute("SELECT variety, heat_summation FROM grapevine_gdd")
+    varieties_data = cursor.fetchall()
+    log(f"Found {len(varieties_data)} varieties.")
+
+    # Helper functions
+    def calculate_daily_chill_hours(cursor, date):
+        date_str = date.strftime('%Y-%m-%d')
+        next_day_str = (date + timedelta(days=1)).strftime('%Y-%m-%d')
+        cursor.execute("""
+            SELECT COUNT(*) FROM readings 
+            WHERE date >= ? AND date < ? AND (CAST(tempf AS REAL) - 32) * 5.0 / 9.0 BETWEEN 0 AND 7
+        """, (date_str, next_day_str))
+        count = cursor.fetchone()[0]
+        return count * 5 / 3600
+
+    def calculate_full_season_chill_hours(year):
+        start_date = datetime(year - 1, 9, 1).strftime('%Y-%m-%d')
+        end_date = datetime(year, 3, 1).strftime('%Y-%m-%d')
+        cursor.execute("""
+            SELECT COUNT(*) FROM readings 
+            WHERE date >= ? AND date < ? AND (CAST(tempf AS REAL) - 32) * 5.0 / 9.0 BETWEEN 0 AND 7
+        """, (start_date, end_date))
+        count = cursor.fetchone()[0]
+        return count * 5 / 3600
+
+    def calculate_daily_gdd(cursor, date):
+        date_str = date.strftime('%Y-%m-%d')
+        next_day_str = (date + timedelta(days=1)).strftime('%Y-%m-%d')
+        cursor.execute("""
+            SELECT AVG(CAST(tempf AS REAL)) FROM readings 
+            WHERE date >= ? AND date < ?
+        """, (date_str, next_day_str))
+        avg_temp_f = cursor.fetchone()[0] or 0
+        avg_temp_c = (avg_temp_f - 32) * 5 / 9
+        return max(0, avg_temp_c - 10)
+
+    # Precompute historical average daily GDD
+    log("Precomputing historical average daily GDD.")
+    historical_avg_gdd = []
+    for target_doy in range(1, 367):
+        total_gdd = 0
+        count = 0
+        for year in historical_years:
+            try:
+                date = datetime(year, 1, 1) + timedelta(days=target_doy - 1)
+                if date.year == year:
+                    total_gdd += calculate_daily_gdd(cursor, date)
+                    count += 1
+            except ValueError:
+                continue
+        avg_gdd = total_gdd / count if count > 0 else 0
+        historical_avg_gdd.append(avg_gdd)
+    log("Completed precomputing GDD.")
+
+    # Estimate current year's chill hours
+    cursor.execute("SELECT COUNT(*) FROM ehml_training_data")
+    if cursor.fetchone()[0] == 0:
+        historical_chill_hours = [calculate_full_season_chill_hours(year) for year in historical_years]
+        current_year_chill_hours = np.mean(historical_chill_hours) if historical_chill_hours else 0
+    else:
+        current_year_chill_hours = 0  # Load later if needed
+    log(f"Estimated current chill hours: {current_year_chill_hours:.2f}")
+
+    # Prepare training data
+    log("Preparing training data.")
+    X_train, y_train = [], []
+    varieties_to_process = [(v, t) for v, t in varieties_data if t is not None]
+    for variety, target_gdd in varieties_to_process:
+        for year in historical_years:
+            cursor.execute("""
+                SELECT current_gdd, doy, chill_hours, mean_gdd, std_gdd, remaining_gdd 
+                FROM ehml_training_data 
+                WHERE variety = ? AND year = ?
+            """, (variety, year))
+            row = cursor.fetchone()
+            if row:
+                current_gdd, doy, chill_hours, mean_gdd, std_gdd, remaining_gdd = row
+                X_train.append([current_gdd, doy, chill_hours, mean_gdd, std_gdd, target_gdd])
+                y_train.append(remaining_gdd)
+                continue
+
+            # Find bud break
+            cursor.execute("""
+                SELECT date, gdd FROM readings 
+                WHERE substr(date, 1, 4)=? AND gdd >= ? 
+                ORDER BY date ASC LIMIT 1
+            """, (str(year), target_gdd))
+            row = cursor.fetchone()
+            if not row:
+                continue
+            bud_break_date = datetime.fromisoformat(row[0].rstrip("Z"))
+            bud_break_gdd = row[1]
+
+            # Current GDD
+            past_date = datetime(year, current_date.month, current_date.day)
+            next_day = past_date + timedelta(days=1)
+            cursor.execute(
+                "SELECT MAX(gdd) FROM readings WHERE substr(date, 1, 4)=? AND date < ?",
+                (str(year), next_day.isoformat())
+            )
+            current_gdd = cursor.fetchone()[0] or 0
+
+            # Chill hours
+            chill_hours = calculate_full_season_chill_hours(year)
+
+            # Historical GDD stats
+            historical_gdds = [
+                cursor.execute(
+                    "SELECT MAX(gdd) FROM readings WHERE substr(date, 1, 4)=? AND date < ?",
+                    (str(h_year), (datetime(h_year, current_date.month, current_date.day) + timedelta(days=1)).isoformat())
+                ).fetchone()[0] or 0
+                for h_year in historical_years
+            ]
+            mean_gdd = np.mean(historical_gdds)
+            std_gdd = np.std(historical_gdds)
+
+            features = [current_gdd, doy, chill_hours, mean_gdd, std_gdd, target_gdd]
+            remaining_gdd = bud_break_gdd - current_gdd
+            X_train.append(features)
+            y_train.append(remaining_gdd)
+
+            cursor.execute("""
+                INSERT OR REPLACE INTO ehml_training_data 
+                (variety, year, current_gdd, doy, chill_hours, mean_gdd, std_gdd, remaining_gdd)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (variety, year, current_gdd, doy, chill_hours, mean_gdd, std_gdd, remaining_gdd))
+            conn.commit()
+
+    # Train model
+    model_file = "ehml_model.pkl"
+    if os.path.exists(model_file):
+        with open(model_file, 'rb') as f:
+            model = pickle.load(f)
+    else:
+        if not X_train:
+            log("Error: No training data.")
+            return
+        X_train = np.array(X_train)
+        y_train = np.array(y_train)
+        model = xgb.XGBRegressor(objective='reg:squarederror', n_estimators=50, max_depth=3)
+        model.fit(X_train, y_train)
+        with open(model_file, 'wb') as f:
+            pickle.dump(model, f)
+        cv_scores = cross_val_score(model, X_train, y_train, cv=5, scoring='neg_mean_squared_error')
+        log(f"Cross-validation MSE: {-np.mean(cv_scores):.2f}")
+
+    # Predict
+    log("Starting predictions.")
+    for variety, target_gdd in varieties_to_process:
+        cursor.execute(f"SELECT {column_name} FROM grapevine_gdd WHERE variety = ?", (variety,))
+        if cursor.fetchone()[0]:
+            continue
+
+        next_day = current_date + timedelta(days=1)
+        cursor.execute(
+            "SELECT MAX(gdd) FROM readings WHERE substr(date, 1, 4)=? AND date < ?",
+            (str(current_year), next_day.isoformat())
+        )
+        current_gdd = cursor.fetchone()[0] or 0
+        chill_hours = current_year_chill_hours
+        historical_gdds = [
+            cursor.execute(
+                "SELECT MAX(gdd) FROM readings WHERE substr(date, 1, 4)=? AND date < ?",
+                (str(h_year), (datetime(h_year, current_date.month, current_date.day) + timedelta(days=1)).isoformat())
+            ).fetchone()[0] or 0
+            for h_year in historical_years
+        ]
+        mean_gdd = np.mean(historical_gdds)
+        std_gdd = np.std(historical_gdds)
+        features = [current_gdd, doy, chill_hours, mean_gdd, std_gdd, target_gdd]
+
+        remaining_gdd = model.predict(np.array([features]))[0]
+        log(f"{variety} - Predicted remaining_gdd: {remaining_gdd:.2f}")
+
+        # Dynamic GDD accumulation
+        accumulated_gdd = 0
+        days_remaining = 0
+        while accumulated_gdd < remaining_gdd and days_remaining < 365:
+            next_doy = (doy + days_remaining - 1) % 366  # 0-based index
+            daily_gdd = historical_avg_gdd[next_doy] or 0.1  # Avoid zero
+            accumulated_gdd += daily_gdd
+            days_remaining += 1
+        log(f"{variety} - Days remaining: {days_remaining}")
+
+        predicted_date = current_date + timedelta(days=days_remaining)
+        cursor.execute(f"UPDATE grapevine_gdd SET {column_name} = ? WHERE variety = ?",
+                       (predicted_date.isoformat(), variety))
+        log(f"{variety} - Predicted bud break: {predicted_date.isoformat()}")
+        conn.commit()
+
+    log("EHML projection completed.")
 
 # --- Main Data Ingestion Loop ---
 def main() -> None:
@@ -1430,6 +1779,7 @@ def main() -> None:
     recalc_gdd(cursor, conn, full=True)
     project_bud_break_regression(cursor, conn)
     project_bud_break_hybrid(cursor, conn)
+    project_bud_break_ehml(cursor, conn)
     log("Data retrieval complete.")
     conn.close()
 

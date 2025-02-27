@@ -1,0 +1,159 @@
+/* Remove default margins/padding for full-screen usage */
+body {
+  font-family: Arial, sans-serif;
+  background: #fafafa;
+  margin: 0;
+  padding: 0;
+  overflow-x: hidden;
+}
+
+h1, h2, h3 {
+  text-align: center;
+  margin: 10px 0;
+}
+
+/* Toggle buttons for slide-out panels */
+#toggleLeftPanel, #toggleRightPanel {
+  position: fixed;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 1000;
+  background: #007acc;
+  color: white;
+  border: none;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
+#toggleLeftPanel {
+  left: 0;
+}
+
+#toggleRightPanel {
+  right: 0;
+}
+
+/* Auto Refresh Toggle Control */
+#autoRefreshControl {
+  text-align: center;
+  margin: 10px 0;
+}
+
+/* Flex container for panels and chart */
+.flex-container {
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  width: 100%;
+  box-sizing: border-box;
+  transition: margin 0.3s ease;
+}
+
+/* Left slide-out panel (months) */
+#leftPanel {
+  width: fit-content;
+  transition: width 0.3s ease;
+  background: #e0e0e0;
+  box-sizing: border-box;
+  padding: 10px;
+  text-align: left;
+}
+
+#leftPanel.hidden {
+  width: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+/* Right slide-out panel (years) */
+#rightPanel {
+  width: fit-content;
+  transition: width 0.3s ease;
+  background: #e0e0e0;
+  box-sizing: border-box;
+  padding: 10px;
+  text-align: right;
+}
+
+#rightPanel.hidden {
+  width: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+/* Chart container fills remaining space */
+#chartContainer {
+  position: relative;
+  flex: 1;
+  padding: 10px;
+  box-sizing: border-box;
+  height: 80vh;
+}
+
+/* Ensure the canvas fills its container */
+canvas {
+  background: #fff;
+  border: 1px solid #ccc;
+  box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
+  width: 100% !important;
+  height: 100% !important;
+  display: block;
+}
+
+/* Ensure the checkboxes are stacked */
+#monthControls label, #yearControls label {
+  display: block;
+  margin: 5px 0;
+}
+
+/* Custom legend container styling for the bottom legend */
+#legendContainer {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 15px;
+  padding: 5px;
+  box-sizing: border-box;
+}
+
+/* Updated legend item style for bottom legend (no button look) */
+#legendContainer .legend-item {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 4px;
+  margin: 2px;
+  font-size: 0.9em;
+  color: #333;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  cursor: pointer;
+}
+
+/* Tooltip for vertical line labels */
+#vlineTooltip {
+  position: absolute;
+  display: none;
+  background: rgba(0, 0, 0, 0.7);
+  color: white;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  pointer-events: none;
+  z-index: 2000;
+}
+
+/* Dropdown styling */
+#modelSelectContainer {
+  text-align: center;
+  margin: 10px 0;
+}
+
+#modelSelect {
+  padding: 5px;
+  font-size: 16px;
+  border-radius: 4px;
+  background-color: #f0f0f0;
+  border: 1px solid #ccc;
+}

@@ -210,6 +210,8 @@
     <select id="modeSelect">
         <option value="normal" selected>Normal</option>
         <option value="nearest">Nearest Neighbor</option>
+        <option value="greater">GDD > Current Year</option>
+        <option value="less">GDD < Current Year</option>
     </select>
     <span id="thresholdContainer" style="display: none; margin-left: 10px;">
       <label for="nnThreshold">Threshold:</label>
@@ -454,8 +456,13 @@
 
     function refreshData() {
         const modeSelect = document.getElementById("modeSelect");
-        if (modeSelect && modeSelect.value === "nearest") {
+        const mode = modeSelect.value;
+        if (mode === "nearest") {
             applyNearestNeighborMode();
+        } else if (mode === "greater") {
+            applyGDDGreaterMode();
+        } else if (mode === "less") {
+            applyGDDLessMode();
         } else {
             loadAndPlotData();
         }
@@ -488,8 +495,8 @@
     }
 
     // Initialize sql.js and load the database
-    initSqlJs({ locateFile: file => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.12.0/${file}` })
-        .then(function(SQLLib) {
+    initSqlJs({locateFile: file => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.12.0/${file}`})
+        .then(function (SQLLib) {
             SQL = SQLLib;
             return fetch(DB_FILENAME);
         })
@@ -504,7 +511,7 @@
 
             // Event listeners for year checkboxes
             document.querySelectorAll("input[name='year']").forEach(cb => {
-                cb.addEventListener("change", function() {
+                cb.addEventListener("change", function () {
                     let allChecked = true;
                     document.querySelectorAll("input[name='year']").forEach(box => {
                         if (!box.checked) {
@@ -521,7 +528,7 @@
             // Event listener for "All Years" checkbox
             const allYearsCb = document.getElementById("allYears");
             if (allYearsCb) {
-                allYearsCb.addEventListener("change", function() {
+                allYearsCb.addEventListener("change", function () {
                     const newState = this.checked;
                     document.querySelectorAll("input[name='year']").forEach(cb => {
                         cb.checked = newState;
@@ -533,7 +540,7 @@
 
             // Event listeners for month checkboxes
             document.querySelectorAll("input[name='month']").forEach(cb => {
-                cb.addEventListener("change", function() {
+                cb.addEventListener("change", function () {
                     let allChecked = true;
                     document.querySelectorAll("input[name='month']").forEach(box => {
                         if (!box.checked) {
@@ -550,7 +557,7 @@
             // Event listener for "All Months" checkbox
             const allMonthsCb = document.getElementById("allMonths");
             if (allMonthsCb) {
-                allMonthsCb.addEventListener("change", function() {
+                allMonthsCb.addEventListener("change", function () {
                     const newState = this.checked;
                     document.querySelectorAll("input[name='month']").forEach(cb => {
                         cb.checked = newState;
@@ -561,7 +568,7 @@
             }
 
             // Event listener for auto-refresh checkbox
-            document.getElementById("autoRefreshCheckbox").addEventListener("change", function() {
+            document.getElementById("autoRefreshCheckbox").addEventListener("change", function () {
                 autoRefresh = this.checked;
                 log("Auto Refresh is now " + (autoRefresh ? "enabled" : "disabled"));
                 if (autoRefresh) {
@@ -572,7 +579,7 @@
             });
 
             // Event listener for model selection dropdown
-            document.getElementById("modelSelect").addEventListener("change", function() {
+            document.getElementById("modelSelect").addEventListener("change", function () {
                 saveFilterSettings();
                 loadAndPlotData();
             });
@@ -1143,7 +1150,8 @@
                     dashPattern = [5, 5];
                     labelSuffix = " (Linear DOY Regression)";
             }
-            const res = db.exec(`SELECT variety, ${columnName} FROM grapevine_gdd`);
+            const res = db.exec(`SELECT variety, ${columnName}
+                                 FROM grapevine_gdd`);
             if (res.length > 0) {
                 res[0].values.forEach(row => {
                     const variety = row[0];
@@ -1162,6 +1170,23 @@
                 });
             }
         }
+
+        // Add vertical line for today's date
+        const today = new Date();
+        const month = (today.getMonth() + 1).toString().padStart(2, '0'); // Month is 0-based, add 1
+        const day = today.getDate().toString().padStart(2, '0');
+        const todayStr = month + '-' + day;
+
+        if (commonLabels.includes(todayStr)) {
+            verticalLines.push({
+                xLabel: todayStr,
+                color: 'black',
+                label: 'Today',
+                lineWidth: 2,
+                dashPattern: [5, 5]
+            });
+        }
+
         if (dailyChart) dailyChart.destroy();
         const ctx = document.getElementById('dailyChart').getContext('2d');
         dailyChart = new Chart(ctx, {
@@ -1231,6 +1256,96 @@
         generateCustomLegend(dailyChart);
     }
 
+    function applyGDDGreaterMode() {
+        if (!db) return;
+        const currentYear = String(new Date().getFullYear());
+        const currentYearQuery = `SELECT date, gdd
+                                  FROM readings
+                                  WHERE substr(date, 1, 4) = '${currentYear}'
+                                  ORDER BY date DESC
+                                  LIMIT 1;`;
+        const stmt = db.prepare(currentYearQuery);
+        let currentRecord = null;
+        if (stmt.step()) {
+            currentRecord = stmt.getAsObject();
+        }
+        stmt.free();
+        if (!currentRecord) {
+            console.log("No data for current year");
+            return;
+        }
+        const currentGDD = parseFloat(currentRecord.gdd);
+        const dayKey = currentRecord.date.substring(5, 10); // MM-DD
+        const query = `SELECT substr(date, 1, 4) as year, MAX(gdd) as gdd
+                       FROM readings
+                       WHERE substr(date, 6, 5) = '${dayKey}'
+                       GROUP BY year
+                       ORDER BY year ASC;`;
+        const results = db.exec(query);
+        let qualifyingYears = [currentYear]; // Include current year for comparison
+        if (results.length > 0) {
+            results[0].values.forEach(row => {
+                const year = row[0];
+                if (year === currentYear) return; // Skip current year in comparison
+                const yearGDD = parseFloat(row[1]);
+                if (yearGDD > currentGDD) {
+                    qualifyingYears.push(year);
+                }
+            });
+        }
+        const yearCheckboxes = document.querySelectorAll("input[name='year']");
+        yearCheckboxes.forEach(cb => {
+            cb.checked = qualifyingYears.includes(cb.value);
+        });
+        selectedYears = qualifyingYears;
+        loadAndPlotData();
+    }
+
+    function applyGDDLessMode() {
+        if (!db) return;
+        const currentYear = String(new Date().getFullYear());
+        const currentYearQuery = `SELECT date, gdd
+                                  FROM readings
+                                  WHERE substr(date, 1, 4) = '${currentYear}'
+                                  ORDER BY date DESC
+                                  LIMIT 1;`;
+        const stmt = db.prepare(currentYearQuery);
+        let currentRecord = null;
+        if (stmt.step()) {
+            currentRecord = stmt.getAsObject();
+        }
+        stmt.free();
+        if (!currentRecord) {
+            console.log("No data for current year");
+            return;
+        }
+        const currentGDD = parseFloat(currentRecord.gdd);
+        const dayKey = currentRecord.date.substring(5, 10); // MM-DD
+        const query = `SELECT substr(date, 1, 4) as year, MAX(gdd) as gdd
+                       FROM readings
+                       WHERE substr(date, 6, 5) = '${dayKey}'
+                       GROUP BY year
+                       ORDER BY year ASC;`;
+        const results = db.exec(query);
+        let qualifyingYears = [currentYear]; // Include current year for comparison
+        if (results.length > 0) {
+            results[0].values.forEach(row => {
+                const year = row[0];
+                if (year === currentYear) return; // Skip current year in comparison
+                const yearGDD = parseFloat(row[1]);
+                if (yearGDD < currentGDD) {
+                    qualifyingYears.push(year);
+                }
+            });
+        }
+        const yearCheckboxes = document.querySelectorAll("input[name='year']");
+        yearCheckboxes.forEach(cb => {
+            cb.checked = qualifyingYears.includes(cb.value);
+        });
+        selectedYears = qualifyingYears;
+        loadAndPlotData();
+    }
+
     function applyNearestNeighborMode() {
         if (!db) return;
         const thresholdInput = document.getElementById("nnThreshold");
@@ -1279,15 +1394,7 @@
 
     document.getElementById("modeSelect").addEventListener("change", function () {
         const mode = this.value;
-        if (mode === 'nearest') {
-            document.getElementById("thresholdContainer").style.display = "inline";
-            document.querySelectorAll("input[name='year']").forEach(cb => {
-                cb.disabled = true;
-            });
-            const allYearsCb = document.getElementById("allYears");
-            if (allYearsCb) allYearsCb.disabled = true;
-            applyNearestNeighborMode();
-        } else {
+        if (mode === 'normal') {
             document.getElementById("thresholdContainer").style.display = "none";
             document.querySelectorAll("input[name='year']").forEach(cb => {
                 cb.disabled = false;
@@ -1295,6 +1402,21 @@
             const allYearsCb = document.getElementById("allYears");
             if (allYearsCb) allYearsCb.disabled = false;
             loadAndPlotData();
+        } else {
+            document.getElementById("thresholdContainer").style.display = "none";
+            document.querySelectorAll("input[name='year']").forEach(cb => {
+                cb.disabled = true;
+            });
+            const allYearsCb = document.getElementById("allYears");
+            if (allYearsCb) allYearsCb.disabled = true;
+            if (mode === 'nearest') {
+                document.getElementById("thresholdContainer").style.display = "inline";
+                applyNearestNeighborMode();
+            } else if (mode === 'greater') {
+                applyGDDGreaterMode();
+            } else if (mode === 'less') {
+                applyGDDLessMode();
+            }
         }
     });
 

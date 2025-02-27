@@ -56,6 +56,9 @@ CURRENT_DATE = None
 OPENMETEO_LAT = None
 OPENMETEO_LON = None
 BUD_BREAK_START = None
+FORECAST_DAYS = None
+FORECAST_MODEL = None
+HISTORICAL_WINDOW_DAYS = None
 
 # Base temperatures for GDD calculations
 BASE_TEMP_C = 10  # °C threshold for 5-minute cumulative GDD
@@ -115,9 +118,10 @@ def reload_config() -> None:
     :raises ConfigParserError: If there is an error while reading the configuration file.
     :raises ValueError: If certain date fields have invalid formats.
     """
-    global DB_FILENAME, RETRY_SLEEP_TIME, RATE_LIMIT_DELAY, API_CALL_DELAY, DEBUG, RECALC_INTERVAL
-    global MAC_ADDRESS, API_KEY, APPLICATION_KEY, BACKUP_MAC_ADDRESS, URL_TEMPLATE, START_DATE, CURRENT_DATE
-    global OPENMETEO_LAT, OPENMETEO_LON, BUD_BREAK_START, GRAPEVINE_CSV, SUNSPOT_CSV
+    global DB_FILENAME, RETRY_SLEEP_TIME, RATE_LIMIT_DELAY, API_CALL_DELAY, DEBUG, RECALC_INTERVAL, \
+    MAC_ADDRESS, API_KEY, APPLICATION_KEY, BACKUP_MAC_ADDRESS, URL_TEMPLATE, START_DATE, CURRENT_DATE, \
+    OPENMETEO_LAT, OPENMETEO_LON, BUD_BREAK_START, GRAPEVINE_CSV, SUNSPOT_CSV, \
+    FORECAST_DAYS, FORECAST_MODEL, HISTORICAL_WINDOW_DAYS
 
     if not os.path.exists(CONFIG_FILE):
         log(f"Error: {CONFIG_FILE} not found.")
@@ -188,6 +192,9 @@ def reload_config() -> None:
     try:
         OPENMETEO_LAT = config.getfloat('openmeteo', 'latitude')
         OPENMETEO_LON = config.getfloat('openmeteo', 'longitude')
+        FORECAST_DAYS = config.getint('openmeteo', 'forecast_days', fallback=16)
+        FORECAST_MODEL = config.get('openmeteo', 'forecast_model', fallback='best_match')
+        HISTORICAL_WINDOW_DAYS = config.getint('global', 'historical_window_days', fallback=16)
     except Exception as e:
         log(f"Error in Open-Meteo configuration: {e}")
         sys.exit(1)
@@ -738,7 +745,7 @@ def calculate_avg_daily_gdd(cursor: sqlite3.Cursor, years: list, current_date: d
     rates = []
     for year in years:
         start_date = datetime(year, current_date.month, current_date.day)
-        end_date = start_date + timedelta(days=14)  # Use a 14-day window
+        end_date = start_date + timedelta(days=HISTORICAL_WINDOW_DAYS)  # Use a 14-day window
         cursor.execute(
             "SELECT MAX(gdd), MIN(gdd) FROM readings WHERE substr(date, 1, 4)=? AND date BETWEEN ? AND ?",
             (str(year), start_date.isoformat(), end_date.isoformat())
@@ -930,8 +937,8 @@ def fetch_openmeteo_forecast() -> any:
         "wind_speed_unit": "mph",
         "precipitation_unit": "inch",
         "timezone": "America/Chicago",
-        "models": "ecmwf_aifs025",
-        "forecast_days": 14
+        "models": FORECAST_MODEL,
+        "forecast_days": FORECAST_DAYS
     }
     log(f"Fetching hourly forecast data from Open-Meteo with params: {params}")
     responses = openmeteo.weather_api(url, params=params)
@@ -1256,7 +1263,7 @@ def project_bud_break_hybrid(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -
         )
         current_gdd = cursor.fetchone()[0] or 0
 
-        forecast_end = (current_date + timedelta(days=14)).isoformat()
+        forecast_end = (current_date + timedelta(days=FORECAST_DAYS)).isoformat()
         cursor.execute(
             "SELECT MAX(gdd) FROM readings WHERE substr(date, 1, 4)=? AND date <= ?",
             (str(current_year), forecast_end)

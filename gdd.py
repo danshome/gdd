@@ -93,12 +93,7 @@ def log_debug(message: str) -> None:
 
     This function appends a "[DEBUG]" prefix to the input message and logs it
     only when the debug mode is active, as indicated by the `DEBUG` global
-    variable. The function does not return any value and silently performs
-    logging without raising exceptions or handling errors.
-
-    :param message: The debug message to be logged.
-    :type message: str
-    :return: None
+    variable.
     """
     if DEBUG:
         log("[DEBUG] " + message)
@@ -107,21 +102,12 @@ def log_debug(message: str) -> None:
 # --- Configuration Reload ---
 def reload_config() -> None:
     """
-    Reloads the configuration settings from a specified configuration file. The function retrieves
-    values from various sections of the configuration file, validating their existence and format.
-    It updates the global variables used throughout the application with these values. If the
-    configuration file is missing, unreadable, or contains invalid entries, the function logs
-    the corresponding errors and gracefully exits the program. Some settings have fallbacks
-    in case certain parameters are optional or missing.
-
-    :raises SystemExit: If the configuration file is missing or certain required values are invalid.
-    :raises ConfigParserError: If there is an error while reading the configuration file.
-    :raises ValueError: If certain date fields have invalid formats.
+    Reloads the configuration settings from a specified configuration file.
     """
     global DB_FILENAME, RETRY_SLEEP_TIME, RATE_LIMIT_DELAY, API_CALL_DELAY, DEBUG, RECALC_INTERVAL, \
-    MAC_ADDRESS, API_KEY, APPLICATION_KEY, BACKUP_MAC_ADDRESS, URL_TEMPLATE, START_DATE, CURRENT_DATE, \
-    OPENMETEO_LAT, OPENMETEO_LON, BUD_BREAK_START, GRAPEVINE_CSV, SUNSPOT_CSV, \
-    FORECAST_DAYS, FORECAST_MODEL, HISTORICAL_WINDOW_DAYS
+        MAC_ADDRESS, API_KEY, APPLICATION_KEY, BACKUP_MAC_ADDRESS, URL_TEMPLATE, START_DATE, CURRENT_DATE, \
+        OPENMETEO_LAT, OPENMETEO_LON, BUD_BREAK_START, GRAPEVINE_CSV, SUNSPOT_CSV, \
+        FORECAST_DAYS, FORECAST_MODEL, HISTORICAL_WINDOW_DAYS
 
     if not os.path.exists(CONFIG_FILE):
         log(f"Error: {CONFIG_FILE} not found.")
@@ -208,14 +194,10 @@ def reload_config() -> None:
 def ensure_database_exists() -> None:
     """
     Ensures that the SQLite database file exists.
-    If it doesn't, attempts to run 'dvc pull <DB_FILENAME>'.
-    If after the pull the file is still missing, prompts the user
-    to decide whether to create a new database.
     """
     if not os.path.exists(DB_FILENAME):
         log("Database file not found. Attempting to retrieve it using 'dvc pull'...")
         try:
-            # Run dvc pull command for the tracked database file.
             subprocess.check_call(["dvc", "pull", DB_FILENAME])
         except subprocess.CalledProcessError as e:
             log(f"Error during dvc pull: {e}")
@@ -231,16 +213,6 @@ def ensure_database_exists() -> None:
 def get_db_connection() -> sqlite3.Connection:
     """
     Establishes a connection to the SQLite database and returns the connection object.
-
-    This function attempts to connect to the SQLite database using the provided
-    database filename. It makes use of the sqlite3 library for the connection.
-    If an error occurs during the connection process, it logs the error message
-    and terminates the program. The successful establishment of the connection
-    returns a sqlite3.Connection object.
-
-    :raises Exception: If there is any error in the database connection process.
-    :return: A connection object representing the SQLite database connection.
-    :rtype: sqlite3.Connection
     """
     try:
         conn = sqlite3.connect(DB_FILENAME)
@@ -252,22 +224,7 @@ def get_db_connection() -> sqlite3.Connection:
 
 def execute_sql(cursor: sqlite3.Cursor, statement: str, params=()) -> None:
     """
-    Executes a provided SQL statement with optional parameters using the given
-    SQLite cursor, handling errors and performing a rollback on failure.
-
-    This function ensures that SQL execution and error handling are managed
-    safely. If an error occurs during the execution of the SQL statement, the
-    error is logged, and the transaction is rolled back to prevent partial
-    executions from affecting the database's state.
-
-    :param cursor: SQLite database cursor for executing the SQL statement.
-    :type cursor: sqlite3.Cursor
-    :param statement: SQL statement to be executed.
-    :type statement: str
-    :param params: Optional parameters to be used with the SQL statement. Defaults to an
-        empty tuple.
-    :type params: tuple, optional
-    :return: None
+    Executes a provided SQL statement with optional parameters using the given SQLite cursor.
     """
     try:
         cursor.execute(statement, params)
@@ -279,16 +236,7 @@ def execute_sql(cursor: sqlite3.Cursor, statement: str, params=()) -> None:
 # --- Table Creation Functions ---
 def create_tables(conn: sqlite3.Connection, cursor: sqlite3.Cursor) -> None:
     """
-    Creates and initializes the required database tables and indexes for storing data related to readings,
-    grapevine growing degree days (GDD), vineyard pests, and sunspots. This function ensures that tables
-    exist within the database and adds relevant indexes to optimize query performance.
-
-    :param conn: Connection object for interacting with the SQLite database
-    :type conn: sqlite3.Connection
-    :param cursor: Cursor object associated with the provided SQLite database connection
-    :type cursor: sqlite3.Cursor
-    :return: None
-    :rtype: None
+    Creates and initializes the required database tables and indexes.
     """
     # Create the readings table
     execute_sql(cursor, """
@@ -332,7 +280,6 @@ def create_tables(conn: sqlite3.Connection, cursor: sqlite3.Cursor) -> None:
     );
     """)
     conn.commit()
-    # Create indexes for improved query performance
     execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_readings_day ON readings (substr(date, 1, 10));")
     execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_gdd ON readings (gdd);")
     execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_readings_year ON readings((substr(date, 1, 4)));")
@@ -343,11 +290,13 @@ def create_tables(conn: sqlite3.Connection, cursor: sqlite3.Cursor) -> None:
                 "CREATE INDEX IF NOT EXISTS idx_readings_year_date_gdd ON readings (substr(date, 1, 4), date, gdd);")
     conn.commit()
 
-    # Create the grapevine_gdd table
+    # Create the grapevine_gdd table with new columns for biofix and accumulated GDD
     execute_sql(cursor, """
     CREATE TABLE IF NOT EXISTS grapevine_gdd (
         variety TEXT PRIMARY KEY,
-        heat_summation INTEGER
+        heat_summation INTEGER,
+        biofix_date TEXT DEFAULT (date('now','start of year')),
+        gdd REAL DEFAULT 0
     );
     """)
     conn.commit()
@@ -394,19 +343,8 @@ def create_tables(conn: sqlite3.Connection, cursor: sqlite3.Cursor) -> None:
 # --- Data Import Functions ---
 def import_grapevine_csv(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -> None:
     """
-    Imports data from the Grapevine CSV file into the `grapevine_gdd` database table. The CSV file must contain
-    the required headers: `variety` and `heat_summation`. If either of these headers is missing, the program
-    will terminate with an appropriate error message.
-
-    For each row in the CSV file, it extracts the values of the `variety` and `heat_summation` columns. If the
-    `heat_summation` column contains invalid data, a value of `None` is used instead. The data is then inserted
-    or updated in the database.
-
-    :param cursor: Database cursor to execute SQL commands.
-    :type cursor: sqlite3.Cursor
-    :param conn: Database connection to commit transactions.
-    :type conn: sqlite3.Connection
-    :return: None
+    Imports data from the Grapevine CSV file into the grapevine_gdd table.
+    Uses an UPSERT so that an existing biofix_date is preserved.
     """
     required_headers = ['variety', 'heat_summation']
     try:
@@ -427,9 +365,11 @@ def import_grapevine_csv(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -> No
                     heat_summation = int(row[heat_idx])
                 except ValueError:
                     heat_summation = None
+                # Use UPSERT to update heat_summation without overwriting biofix_date.
                 execute_sql(cursor, """
-                    INSERT OR REPLACE INTO grapevine_gdd (variety, heat_summation)
+                    INSERT INTO grapevine_gdd (variety, heat_summation)
                     VALUES (?, ?)
+                    ON CONFLICT(variety) DO UPDATE SET heat_summation = excluded.heat_summation
                 """, (variety, heat_summation))
         conn.commit()
     except Exception as e:
@@ -438,18 +378,7 @@ def import_grapevine_csv(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -> No
 
 def import_vineyard_pests(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -> None:
     """
-    Imports vineyard pest data from a CSV file into a database table for vineyard pests.
-    This function reads the data from the CSV file specified in the VINEYARD_PESTS_CSV
-    constant, and attempts to insert or replace the content in the `vineyard_pests` database
-    table. Each row in the CSV is processed and inserted into the database. In case of
-    errors during file reading or SQL execution, relevant error messages are logged.
-
-    :param cursor: Database cursor used to execute SQL statements.
-    :type cursor: sqlite3.Cursor
-    :param conn: Open SQLite connection for committing database transactions.
-    :type conn: sqlite3.Connection
-    :return: This function does not return a value.
-    :rtype: None
+    Imports vineyard pest data from a CSV file into the vineyard_pests table.
     """
     try:
         df_pests = pd.read_csv(VINEYARD_PESTS_CSV)
@@ -480,16 +409,7 @@ def import_vineyard_pests(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -> N
 
 def import_sunspots_data(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -> None:
     """
-    Imports sunspot data from an online source (SIDC) and updates the database. The function checks if
-    the remote CSV file has changed by analyzing the Last-Modified header. If the file hasn't changed,
-    it skips downloading. Otherwise, it downloads and processes the file, extracting and inserting
-    relevant data into a SQLite database.
-
-    :param cursor: SQLite database cursor. Required for executing SQL commands related to sunspot data.
-                   Should be connected to the database where sunspot data is stored.
-    :param conn: SQLite database connection. Used to commit changes to the database after insert
-                 operations.
-    :return: None
+    Imports sunspot data from the SIDC CSV file into the sunspots table.
     """
     sunspot_url = "https://www.sidc.be/SILSO/INFO/sndtotcsv.php?"
     download_file = True
@@ -580,31 +500,40 @@ def import_sunspots_data(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -> No
         log(f"Error processing {SUNSPOT_CSV}: {e}")
 
 
-# --- Data Processing Functions ---
+# --- New Function: Recalculate Varietal GDD Using biofix_date ---
+def recalc_varietal_gdd(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -> None:
+    """
+    For each grapevine variety, calculates the cumulative GDD from its biofix_date.
+    Uses the formula: inc = max(0, (temp_c - BASE_TEMP_C)) / 288, summing over readings where date >= biofix_date.
+    Updates the grapevine_gdd.gdd column with the accumulated value.
+    """
+    cursor.execute("SELECT variety, COALESCE(biofix_date, date('now','start of year')) FROM grapevine_gdd")
+    rows = cursor.fetchall()
+    for variety, biofix_date in rows:
+        # Ensure we have a complete ISO datetime string (assume midnight UTC if only date provided)
+        start_iso = biofix_date if "T" in biofix_date else biofix_date + "T00:00:00Z"
+        cursor.execute("SELECT tempf FROM readings WHERE date >= ? ORDER BY date ASC", (start_iso,))
+        readings = cursor.fetchall()
+        cumulative = 0.0
+        for (tempf,) in readings:
+            if tempf is None:
+                continue
+            try:
+                temp = float(tempf)
+            except Exception:
+                continue
+            temp_c = (temp - 32) * 5 / 9
+            inc = max(0, temp_c - BASE_TEMP_C) / 288
+            cumulative += inc
+        execute_sql(cursor, "UPDATE grapevine_gdd SET gdd = ? WHERE variety = ?", (cumulative, variety))
+        log(f"Updated {variety}: biofix_date={biofix_date}, accumulated GDD={cumulative:.3f}")
+    conn.commit()
+
+
+# --- Data Processing Functions (Existing) ---
 def recalc_gdd(cursor: sqlite3.Cursor, conn: sqlite3.Connection, full: bool = False) -> None:
     """
     Recalculate Growing Degree Days (GDD) for weather readings.
-
-    This function calculates cumulative GDD values for weather readings stored
-    in a database. Both full recalculations (starting from the earliest records)
-    and incremental recalculations (only for new records) are supported.
-
-    For every year of records in the database, the GDD is calculated based on
-    the provided temperature readings. Incremental GDD is computed in short
-    time intervals and cumulatively added for accurate tracking.
-
-    :warning: Ensure the database schema includes `readings` table with relevant
-    columns (`dateutc`, `tempf`, `date`, `gdd`) before using this function.
-
-    :param cursor: Database cursor to execute SQL statements.
-    :type cursor: sqlite3.Cursor
-    :param conn: Database connection object for committing the changes.
-    :type conn: sqlite3.Connection
-    :param full: A flag indicating whether to perform a full recalculation. If False,
-                 only incremental recalculation is performed.
-    :type full: bool
-    :raises sqlite3.Error: If any SQL-related operation fails.
-    :return: None
     """
     if full:
         log("Performing full GDD recalculation from the beginning...")
@@ -650,9 +579,7 @@ def recalc_gdd(cursor: sqlite3.Cursor, conn: sqlite3.Connection, full: bool = Fa
                 except Exception as e:
                     log(f"Skipping record {dateutc} due to invalid tempf: {tempf}")
                     continue
-                # Convert Fahrenheit to Celsius for GDD calculation
                 temp_c = (val - 32) * 5 / 9
-                # Incremental GDD is calculated on a 5-minute basis
                 inc = max(0, (temp_c - BASE_TEMP_C)) / 288
                 cumulative_gdd += inc
                 execute_sql(cursor, "UPDATE readings SET gdd = ? WHERE dateutc = ?", (cumulative_gdd, dateutc))
@@ -664,50 +591,18 @@ def recalc_gdd(cursor: sqlite3.Cursor, conn: sqlite3.Connection, full: bool = Fa
     else:
         log("Incremental GDD recalculation complete.")
 
-def calculate_chill_hours(cursor: sqlite3.Cursor, start_date: datetime, end_date: datetime, threshold: float = 45) -> float:
-    """
-    Calculate the number of chill hours within a specified date range.
-    Chill hours are calculated based on the number of 5-minute intervals within
-    the provided date range where the temperature falls below a given threshold.
 
-    :param cursor: A database cursor object used to execute SQL queries.
-    :type cursor: sqlite3.Cursor
-    :param start_date: The start of the date range in datetime format.
-    :type start_date: datetime
-    :param end_date: The end of the date range in datetime format.
-    :type end_date: datetime
-    :param threshold: The temperature threshold in Fahrenheit for determining chill hours.
-        Default is 45.
-    :type threshold: float
-    :return: The total number of chill hours (as a float) calculated by summing up
-        applicable 5-minute intervals and converting the time to hours.
-    :rtype: float
-    """
+def calculate_chill_hours(cursor: sqlite3.Cursor, start_date: datetime, end_date: datetime, threshold: float = 45) -> float:
     cursor.execute(
         "SELECT COUNT(*) FROM readings WHERE date >= ? AND date <= ? AND tempf < ?",
         (start_date.isoformat(), end_date.isoformat(), threshold)
     )
-    chill_intervals = cursor.fetchone()[0]  # Number of 5-minute intervals
-    chill_hours = chill_intervals * (5 / 60)  # Convert to hours
+    chill_intervals = cursor.fetchone()[0]
+    chill_hours = chill_intervals * (5 / 60)
     return chill_hours
 
+
 def calculate_historical_gdds(cursor: sqlite3.Cursor, years: list, doy: int) -> list:
-    """
-    Calculate historical Growing Degree Days (GDDs) up to a specific day of the year for multiple years.
-
-    This function queries a SQLite database, retrieves the maximum GDD values up to a given day of
-    the year for each year in the provided list, and returns these values in a list.
-
-    :param cursor: Database cursor used to execute SQLite queries.
-    :type cursor: sqlite3.Cursor
-    :param years: List of years for which GDD calculations are performed.
-    :type years: list
-    :param doy: Day of the year (starting from 1) up to which GDD is calculated for each year.
-    :type doy: int
-    :return: A list containing the maximum GDD values for each year in the given range. If no GDD
-             values are found for a year, a 0 is added to the list for that year.
-    :rtype: list
-    """
     historical_gdds = []
     for year in years:
         target_date = datetime(year, 1, 1) + timedelta(days=doy - 1)
@@ -719,33 +614,12 @@ def calculate_historical_gdds(cursor: sqlite3.Cursor, years: list, doy: int) -> 
         historical_gdds.append(gdd if gdd is not None else 0)
     return historical_gdds
 
-def calculate_avg_daily_gdd(cursor: sqlite3.Cursor, years: list, current_date: datetime) -> float:
-    """
-    Calculates the average daily Growing Degree Days (GDD) rate over a 14-day window
-    around the `current_date` for the given years using the provided database cursor.
-    GDD is a measure often used in agriculture to estimate plant development rates.
-    This function retrieves maximum and minimum GDD values from the database for
-    the 14-day window and computes the average daily difference for each year provided.
-    If no data is available, a default rate of 2.0 GDD/day is returned.
 
-    :param cursor:
-        The database cursor to execute queries. Expected to support standard
-        SQLite operations.
-    :param years:
-        A list of integer years for which the average daily GDD is to be calculated.
-    :param current_date:
-        A datetime object representing the date around which the 14-day window is
-        centered.
-    :return:
-        The average of daily GDD rates calculated over the given years. If no data
-        is available for any year, a default rate of 2.0 GDD/day is returned.
-    :rtype:
-        float
-    """
+def calculate_avg_daily_gdd(cursor: sqlite3.Cursor, years: list, current_date: datetime) -> float:
     rates = []
     for year in years:
         start_date = datetime(year, current_date.month, current_date.day)
-        end_date = start_date + timedelta(days=HISTORICAL_WINDOW_DAYS)  # Use a 14-day window
+        end_date = start_date + timedelta(days=HISTORICAL_WINDOW_DAYS)
         cursor.execute(
             "SELECT MAX(gdd), MIN(gdd) FROM readings WHERE substr(date, 1, 4)=? AND date BETWEEN ? AND ?",
             (str(year), start_date.isoformat(), end_date.isoformat())
@@ -754,25 +628,10 @@ def calculate_avg_daily_gdd(cursor: sqlite3.Cursor, years: list, current_date: d
         if max_gdd and min_gdd:
             rate = (max_gdd - min_gdd) / 14
             rates.append(rate)
-    return sum(rates) / len(rates) if rates else 2.0  # Default to 2 GDD/day if no data
+    return sum(rates) / len(rates) if rates else 2.0
+
 
 def fetch_day_data(mac_address: str, end_date: str) -> any:
-    """
-    Fetches data for a specific device from an API.
-
-    This function makes a call to a specified API using a formatted URL that contains the
-    device `mac_address` and the `end_date`. The function handles various HTTP status
-    codes and retries the request when applicable. It respects API rate limits, retries
-    on server errors, and handles request delays specified by the server.
-
-    :param mac_address: The MAC address of the device to fetch data for.
-    :type mac_address: str
-    :param end_date: The endpoint's date parameter in string format.
-    :type end_date: str
-    :return: Parsed JSON response from the API if successful, or None if no valid
-        data is retrieved.
-    :rtype: any
-    """
     url = URL_TEMPLATE.format(
         mac_address=mac_address,
         api_key=API_KEY,
@@ -844,18 +703,6 @@ def fetch_day_data(mac_address: str, end_date: str) -> any:
 
 
 def fetch_openmeteo_data(day_str: str) -> any:
-    """
-    Fetches weather data from the Open-Meteo archive API for a given date and returns it in a structured format.
-    The function retrieves hourly temperature data for the specified date using the Open-Meteo API and formats
-    the data into a pandas DataFrame. It utilizes caching and retry mechanisms to ensure efficient and reliable
-    data fetching.
-
-    :param day_str: The specific date for which weather data is to be fetched, formatted as "YYYY-MM-DD".
-    :type day_str: str
-    :return: A pandas DataFrame containing the date range and temperature data if successful, or None if no data
-             is retrieved or an error occurs.
-    :rtype: any
-    """
     try:
         import openmeteo_requests
         import requests_cache
@@ -903,19 +750,6 @@ def fetch_openmeteo_data(day_str: str) -> any:
 
 
 def fetch_openmeteo_forecast() -> any:
-    """
-    Fetches hourly weather forecast data using the Open-Meteo API.
-
-    This function retrieves hourly weather forecast data, specifically focusing on the
-    temperature at 2 meters above ground level, for the configured geographic coordinates.
-    The fetching process uses caching and retry mechanisms to ensure reliable and efficient
-    data retrieval. The data is then structured into a pandas DataFrame for further use.
-
-    :raises ImportError: If required libraries are not installed.
-    :return: A pandas DataFrame containing date and temperature data for the forecast period,
-        or None if no data is retrieved.
-    :rtype: pandas.DataFrame or None
-    """
     try:
         import openmeteo_requests
         import requests_cache
@@ -961,23 +795,6 @@ def fetch_openmeteo_forecast() -> any:
 
 
 def fill_missing_data_by_gap(cursor: sqlite3.Cursor, conn: sqlite3.Connection, day_str: str) -> None:
-    """
-    Fill missing data in the database using interpolation of temperature readings within a specific day.
-
-    This function fills gaps in database records for the given day by interpolating missing temperature
-    readings at regular intervals of 300 seconds. It calculates expected timestamps for the day, compares
-    them with existing timestamps in the database, and generates interpolated temperature values for
-    missing timestamps. The interpolated temperature readings are then inserted into the database.
-
-    :param cursor: SQLite cursor object used to execute SQL queries.
-    :type cursor: sqlite3.Cursor
-    :param conn: SQLite connection object to commit changes after inserting interpolated readings.
-    :type conn: sqlite3.Connection
-    :param day_str: Date in 'YYYY-MM-DD' format representing the day for which missing data should
-                    be interpolated.
-    :type day_str: str
-    :return: None
-    """
     try:
         dt_day = datetime.strptime(day_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     except Exception as e:
@@ -999,7 +816,6 @@ def fill_missing_data_by_gap(cursor: sqlite3.Cursor, conn: sqlite3.Connection, d
         log(f"No readings found for {day_str} to interpolate.")
         return
 
-    # Build a dictionary of available data keyed by the snapped grid timestamp
     available = {}
     for ts, temp in rows:
         snapped = expected_start + ((ts - expected_start) // 300) * 300
@@ -1007,7 +823,6 @@ def fill_missing_data_by_gap(cursor: sqlite3.Cursor, conn: sqlite3.Connection, d
             available[snapped] = temp
 
     grid_points = sorted(available.keys())
-    # Iterate over expected points and interpolate if missing
     for point in expected_points:
         if point in available:
             continue
@@ -1038,28 +853,6 @@ def fill_missing_data_by_gap(cursor: sqlite3.Cursor, conn: sqlite3.Connection, d
 
 
 def append_forecast_data(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -> None:
-    """
-    Append forecast data to the database by first deleting existing forecast data for
-    dates greater than or equal to the current date, and then inserting newly fetched
-    forecast data from Open-Meteo. Forecast data is fetched and inserted hour-by-hour.
-    After insertion, the function loops over each forecast day and calls an interpolation
-    routine to generate missing 5‑minute interval readings.
-
-    The function performs the following steps:
-    1. Deletes existing forecast data from the "readings" table where dates are greater
-       than or equal to today's date.
-    2. Fetches forecast data from the external Open-Meteo API, processes it, and inserts
-       the new data into the "readings" table.
-
-    Errors during database operations or data fetching are logged.
-
-    :param cursor: The SQLite cursor object, used for executing database queries.
-    :type cursor: sqlite3.Cursor
-    :param conn: The SQLite connection object, used for transaction management.
-    :type conn: sqlite3.Connection
-    :return: This function does not return any value; it modifies the database directly.
-    :rtype: None
-    """
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     try:
         execute_sql(cursor, "DELETE FROM readings WHERE substr(date, 1, 10) >= ?", (today_str,))
@@ -1070,7 +863,6 @@ def append_forecast_data(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -> No
 
     forecast_df = fetch_openmeteo_forecast()
     if forecast_df is not None and not forecast_df.empty:
-        # Insert hourly forecast readings
         for idx, row in forecast_df.iterrows():
             dt_forecast = row["date"]
             ts = int(dt_forecast.timestamp())
@@ -1087,7 +879,6 @@ def append_forecast_data(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -> No
         conn.commit()
         log(f"Inserted forecast data for {len(forecast_df)} hours into readings.")
 
-        # Determine unique forecast days from the forecast DataFrame
         forecast_days = set(row["date"].date() for idx, row in forecast_df.iterrows())
         for day in sorted(forecast_days):
             day_str = day.strftime("%Y-%m-%d")
@@ -1099,26 +890,11 @@ def append_forecast_data(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -> No
         log("Forecast data unavailable from Open-Meteo.")
 
 
+# --- Updated Bud Break Regression Using biofix_date ---
 def project_bud_break_regression(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -> None:
     """
     Executes a process to analyze historical data and forecast projected bud-break dates for grapevine varieties.
-    This is done by performing linear regression on day-of-year (DOY) values where grapevine growth degree
-    days (GDDs) exceed a defined threshold. Predictions are stored in the `grapevine_gdd` table under the
-    `regression_projected_bud_break` column. If the column is non-existent, it will be added automatically.
-
-    The following steps are performed:
-    1. Ensures the `regression_projected_bud_break` column exists in the `grapevine_gdd` table.
-    2. Identifies the range of years using records from the `readings` table.
-    3. For each grapevine variety, calculates regression parameters (slope and intercept)
-       using historical data.
-    4. Applies the regression model to predict the DOY for the current year, converts it into
-       a date, and updates this information to the database.
-
-    :param cursor: SQLite database cursor used to execute SQL statements.
-    :type cursor: sqlite3.Cursor
-    :param conn: SQLite database connection object for committing changes.
-    :type conn: sqlite3.Connection
-    :return: None
+    This version uses each variety's biofix_date as the start of the growing season.
     """
     column_name = "regression_projected_bud_break"
     try:
@@ -1142,22 +918,31 @@ def project_bud_break_regression(cursor: sqlite3.Cursor, conn: sqlite3.Connectio
 
     historical_years = list(range(oldest_year, current_year))
     try:
-        cursor.execute("SELECT variety, heat_summation FROM grapevine_gdd")
+        cursor.execute("SELECT variety, heat_summation, biofix_date FROM grapevine_gdd")
         varieties = cursor.fetchall()
     except sqlite3.Error as e:
         log(f"Error fetching grapevine_gdd data: {e}")
         return
 
-    for variety, heat_sum in varieties:
+    for variety, heat_sum, biofix_date in varieties:
         if heat_sum is None:
             log(f"Skipping {variety} due to undefined heat_summation.")
             continue
+        # Use biofix_date as start; if missing, default to Jan 1 of that year.
+        if biofix_date is None:
+            biofix_date = f"{current_year}-01-01"
+        try:
+            bd_dt = datetime.strptime(biofix_date, "%Y-%m-%d")
+        except Exception as ex:
+            bd_dt = datetime(current_year, 1, 1)
+        biofix_md = bd_dt.strftime("%m-%d")
         data_points = []
         for yr in historical_years:
+            start_date_str = f"{yr}-{biofix_md}T00:00:00Z"
             try:
                 cursor.execute(
-                    "SELECT date FROM readings WHERE substr(date, 1, 4)=? AND gdd >= ? ORDER BY date ASC LIMIT 1",
-                    (str(yr), heat_sum)
+                    "SELECT date FROM readings WHERE date >= ? AND gdd >= ? ORDER BY date ASC LIMIT 1",
+                    (start_date_str, heat_sum)
                 )
                 row = cursor.fetchone()
                 if row:
@@ -1187,30 +972,8 @@ def project_bud_break_regression(cursor: sqlite3.Cursor, conn: sqlite3.Connectio
     conn.commit()
 
 
+# --- Existing Bud Break Projection Functions (Hybrid and EHML) ---
 def project_bud_break_hybrid(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -> None:
-    """
-    Calculates and updates hybrid-projected bud break dates and ranges for grapevine varieties
-    using historical growing degree days (GDD) data and forecasting methods. This process leverages
-    past GDD values for prediction while accounting for variability and forecasts future bud break
-    dates based on accumulated and forecasted GDD values.
-
-    The function also manages database schema changes when necessary by adding required columns
-    if they are absent in the target table. It then iterates through all grapevine
-    varieties stored in the database, calculates the needed parameters, and updates
-    the database with the predicted bud break date and associated confidence range.
-
-    :param cursor: Database cursor for executing SQL queries. Assumes a connection
-        to a database that adheres to the schema described in the function.
-    :type cursor: sqlite3.Cursor
-    :param conn: Active SQLite database connection object used for committing changes
-        to the database after successful completion of updates.
-    :type conn: sqlite3.Connection
-    :return: This function does not return a value; output is written directly to the
-        database and logged through the logging system.
-    :rtype: None
-    :raises sqlite3.OperationalError: Raised when a SQL operation fails, such as
-        schema modifications or queries, caused by database issues.
-    """
     for col in ["hybrid_projected_bud_break", "hybrid_bud_break_range"]:
         try:
             execute_sql(cursor, f"ALTER TABLE grapevine_gdd ADD COLUMN {col} TEXT")
@@ -1314,15 +1077,8 @@ def project_bud_break_hybrid(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -
         log(f"Hybrid predicted bud break for {variety}: {predicted_date.isoformat()} (±{doy_std:.1f} days)")
     conn.commit()
 
-def project_bud_break_ehml(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -> None:
-    """
-    Projects bud break dates using an enhanced EHML model with 25 years of temperature data at 5-second intervals.
-    Uses dynamic GDD accumulation based on historical averages for accurate date predictions.
 
-    :param cursor: SQLite database cursor for executing queries.
-    :param conn: SQLite database connection object for committing changes.
-    :return: None
-    """
+def project_bud_break_ehml(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -> None:
     log("Starting EHML bud break projection.")
 
     # Define prediction column
@@ -1410,7 +1166,6 @@ def project_bud_break_ehml(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -> 
         avg_temp_c = (avg_temp_f - 32) * 5 / 9
         return max(0, avg_temp_c - 10)
 
-    # Precompute historical average daily GDD
     log("Precomputing historical average daily GDD.")
     historical_avg_gdd = []
     for target_doy in range(1, 367):
@@ -1428,16 +1183,14 @@ def project_bud_break_ehml(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -> 
         historical_avg_gdd.append(avg_gdd)
     log("Completed precomputing GDD.")
 
-    # Estimate current year's chill hours
     cursor.execute("SELECT COUNT(*) FROM ehml_training_data")
     if cursor.fetchone()[0] == 0:
         historical_chill_hours = [calculate_full_season_chill_hours(year) for year in historical_years]
         current_year_chill_hours = np.mean(historical_chill_hours) if historical_chill_hours else 0
     else:
-        current_year_chill_hours = 0  # Load later if needed
+        current_year_chill_hours = 0
     log(f"Estimated current chill hours: {current_year_chill_hours:.2f}")
 
-    # Prepare training data
     log("Preparing training data.")
     X_train, y_train = [], []
     varieties_to_process = [(v, t) for v, t in varieties_data if t is not None]
@@ -1455,7 +1208,6 @@ def project_bud_break_ehml(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -> 
                 y_train.append(remaining_gdd)
                 continue
 
-            # Find bud break
             cursor.execute("""
                 SELECT date, gdd FROM readings 
                 WHERE substr(date, 1, 4)=? AND gdd >= ? 
@@ -1467,7 +1219,6 @@ def project_bud_break_ehml(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -> 
             bud_break_date = datetime.fromisoformat(row[0].rstrip("Z"))
             bud_break_gdd = row[1]
 
-            # Current GDD
             past_date = datetime(year, current_date.month, current_date.day)
             next_day = past_date + timedelta(days=1)
             cursor.execute(
@@ -1476,10 +1227,8 @@ def project_bud_break_ehml(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -> 
             )
             current_gdd = cursor.fetchone()[0] or 0
 
-            # Chill hours
             chill_hours = calculate_full_season_chill_hours(year)
 
-            # Historical GDD stats
             historical_gdds = [
                 cursor.execute(
                     "SELECT MAX(gdd) FROM readings WHERE substr(date, 1, 4)=? AND date < ?",
@@ -1502,7 +1251,6 @@ def project_bud_break_ehml(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -> 
             """, (variety, year, current_gdd, doy, chill_hours, mean_gdd, std_gdd, remaining_gdd))
             conn.commit()
 
-    # Train model
     model_file = "ehml_model.pkl"
     if os.path.exists(model_file):
         with open(model_file, 'rb') as f:
@@ -1520,7 +1268,6 @@ def project_bud_break_ehml(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -> 
         cv_scores = cross_val_score(model, X_train, y_train, cv=5, scoring='neg_mean_squared_error')
         log(f"Cross-validation MSE: {-np.mean(cv_scores):.2f}")
 
-    # Predict
     log("Starting predictions.")
     for variety, target_gdd in varieties_to_process:
         cursor.execute(f"SELECT {column_name} FROM grapevine_gdd WHERE variety = ?", (variety,))
@@ -1548,12 +1295,11 @@ def project_bud_break_ehml(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -> 
         remaining_gdd = model.predict(np.array([features]))[0]
         log(f"{variety} - Predicted remaining_gdd: {remaining_gdd:.2f}")
 
-        # Dynamic GDD accumulation
         accumulated_gdd = 0
         days_remaining = 0
         while accumulated_gdd < remaining_gdd and days_remaining < 365:
-            next_doy = (doy + days_remaining - 1) % 366  # 0-based index
-            daily_gdd = historical_avg_gdd[next_doy] or 0.1  # Avoid zero
+            next_doy = (doy + days_remaining - 1) % 366
+            daily_gdd = historical_avg_gdd[next_doy] or 0.1
             accumulated_gdd += daily_gdd
             days_remaining += 1
         log(f"{variety} - Days remaining: {days_remaining}")
@@ -1570,36 +1316,6 @@ def project_bud_break_ehml(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -> 
 def main() -> None:
     """
     Main execution function for data retrieval pipeline.
-
-    This function orchestrates the entire data retrieval process, which includes:
-    reloading the configurations, establishing a database connection, processing
-    multiple sources of meteorological data (primary, backup, and Open-Meteo),
-    and handling missing data through fallback mechanisms such as interpolation.
-    It also updates the Growing Degree Day (GDD) calculations, both incrementally
-    and fully, to ensure accurate thermal accumulation and progression data for
-    the monitored environment.
-
-    It operates in the context of predefined constants such as `START_DATE` and
-    `CURRENT_DATE`, iterating daily over this date range and ensuring that all
-    necessary temperature readings are retrieved or imputed using hierarchical
-    retrieval logic.
-
-    Key stages include:
-    - Primary data fetching via API and inserting into the database.
-    - Backup data fetching and inserting or updating when primary data is
-      inadequate.
-    - Open-Meteo data integration when both primary and backup sources are
-      insufficient.
-    - Data quality assurance through gap-filling and interpolation.
-    - Incremental and full recalculation of GDD values.
-    - Final steps such as regression projections based on the data.
-
-    This function is designed to be idempotent for a day-level execution, ensuring
-    no unintended duplication of records or loss of data due to partial processing
-    errors.
-
-    :param None:
-    :return: None
     """
     reload_config()
     ensure_database_exists()
@@ -1622,7 +1338,6 @@ def main() -> None:
             log(f"Error fetching count for {day_str}: {e}")
             old_count = 0
 
-        # --- Primary Data Insertion ---
         if old_count >= 287:
             log(f"{day_str}: Already has {old_count} readings; skipping primary API call.")
         else:
@@ -1678,7 +1393,6 @@ def main() -> None:
                 except sqlite3.Error as e:
                     log(f"Error fetching new count for {day_str}: {e}")
 
-        # --- Backup Data Insertion ---
         try:
             cursor.execute("SELECT COUNT(*) FROM readings WHERE substr(date,1,10)=? AND tempf IS NOT NULL", (day_str,))
             valid_count = cursor.fetchone()[0]
@@ -1747,22 +1461,6 @@ def main() -> None:
             else:
                 log(f"No backup data received for {day_str}.")
 
-        # --- Open-Meteo Fallback ---
-        if valid_count < 287:
-            log(f"{day_str}: Only {valid_count} valid readings after backup. Attempting to use Open-Meteo data.")
-            df_obj = fetch_openmeteo_data(day_str)
-            if df_obj is not None and not df_obj.empty:
-                for idx, row in df_obj.iterrows():
-                    if pd.isnull(row['tempf']):
-                        log(f"Skipping row {idx} due to missing tempf value.")
-                        continue
-                    try:
-                        tempf = round(float(row['tempf']), 1)
-                    except Exception as ex:
-                        log(f"Error rounding tempf value for row {idx}: {ex}")
-                        continue
-                    ts = int(row['date'].timestamp())
-                    # Here you may insert fallback data if desired.
         if valid_count < 287:
             log(f"{day_str}: Only {valid_count} valid readings after all fallbacks. Filling gaps via interpolation.")
             fill_missing_data_by_gap(cursor, conn, day_str)
@@ -1776,7 +1474,6 @@ def main() -> None:
             log(f"Error fetching count after interpolation for {day_str}: {e}")
         day += timedelta(days=1)
 
-    # Recalculate GDD values incrementally and then perform a full recalculation
     recalc_gdd(cursor, conn, full=False)
     append_forecast_data(cursor, conn)
     log("Clearing all GDD values before full recalculation...")
@@ -1784,6 +1481,8 @@ def main() -> None:
     conn.commit()
     log("Performing final full recalculation of cumulative, hourly, and daily GDD...")
     recalc_gdd(cursor, conn, full=True)
+    # Recalculate varietal-specific GDD using biofix_date
+    recalc_varietal_gdd(cursor, conn)
     project_bud_break_regression(cursor, conn)
     project_bud_break_hybrid(cursor, conn)
     project_bud_break_ehml(cursor, conn)

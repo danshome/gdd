@@ -1,5 +1,5 @@
 outs:
-- md5: 3a5aa3ab910a019080f1ad532069df1f
-  size: 740139008
+- md5: cac17ef900e85c76b26ceabece9ca070
+  size: 590319616
   hash: md5
   path: ambient_weather.sqlite

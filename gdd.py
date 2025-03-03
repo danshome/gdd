@@ -286,8 +286,8 @@ def create_tables(conn: sqlite3.Connection, cursor: sqlite3.Cursor) -> None:
     execute_sql(cursor,
                 "CREATE INDEX IF NOT EXISTS idx_readings_month ON readings((cast(substr(date, 6, 2) as integer)));")
     execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_readings_date ON readings (date);")
-    execute_sql(cursor,
-                "CREATE INDEX IF NOT EXISTS idx_readings_year_date_gdd ON readings (substr(date, 1, 4), date, gdd);")
+    # execute_sql(cursor,
+    #             "CREATE INDEX IF NOT EXISTS idx_readings_year_date_gdd ON readings (substr(date, 1, 4), date, gdd);")
     conn.commit()
 
     # Create the grapevine_gdd table with new columns for biofix and accumulated GDD
@@ -314,7 +314,7 @@ def create_tables(conn: sqlite3.Connection, cursor: sqlite3.Cursor) -> None:
     );
     """)
     conn.commit()
-    execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_vineyard_pests_gdd ON vineyard_pests(min_gdd, max_gdd);")
+    # execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_vineyard_pests_gdd ON vineyard_pests(min_gdd, max_gdd);")
     conn.commit()
 
     # Create the sunspots table
@@ -333,7 +333,7 @@ def create_tables(conn: sqlite3.Connection, cursor: sqlite3.Cursor) -> None:
     );
     """)
     conn.commit()
-    execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_sunspots_date ON sunspots(date);")
+    # execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_sunspots_date ON sunspots(date);")
     execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_sunspots_year ON sunspots((substr(date, 1, 4)));")
     execute_sql(cursor,
                 "CREATE INDEX IF NOT EXISTS idx_sunspots_month ON sunspots((cast(substr(date, 6, 2) as integer)));")

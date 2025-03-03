@@ -896,30 +896,30 @@ function loadAndPlotData() {
     let verticalLines = [];
     const currentYear = String(new Date().getFullYear());
     if (selectedYears.includes(currentYear)) {
-        const selectedModel = (document.getElementById("modelSelect") || {}).value || "linearDOYRegression";
+        const selectedModel = (document.getElementById("modelSelect") || {}).value || "historicalRegression";
         let columnName;
         let dashPattern;
         let labelSuffix;
         switch (selectedModel) {
-            case "linearDOYRegression":
+            case "historicalRegression":
                 columnName = "regression_projected_bud_break";
                 dashPattern = [5, 5];
-                labelSuffix = " (Linear DOY Regression)";
+                labelSuffix = " (Historical Regression Model)";
                 break;
-            case "medianGDDEnsemble":
+            case "dynamicGDDProjection":
                 columnName = "hybrid_projected_bud_break";
                 dashPattern = [];
-                labelSuffix = " (Median GDD Ensemble)";
+                labelSuffix = " (Dynamic GDD Projection)";
                 break;
-            case "mlMultivariateGDD":
+            case "advancedMLForecast":
                 columnName = "ehml_projected_bud_break";
                 dashPattern = [10, 3];
-                labelSuffix = " (ML Multivariate GDD)";
+                labelSuffix = " (Advanced ML Forecast)";
                 break;
             default:
                 columnName = "regression_projected_bud_break";
                 dashPattern = [5, 5];
-                labelSuffix = " (Linear DOY Regression)";
+                labelSuffix = " (Historical Regression Model)";
         }
         const res = db.exec(`SELECT variety, ${columnName}
                              FROM grapevine_gdd`);

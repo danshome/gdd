@@ -1,107 +1,117 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <title>Ambient Weather – Daily Avg Temp, Cumulative GDD, Daily Rain & Bud Break</title>
-  <!-- External CSS -->
-  <link rel="stylesheet" href="styles.css">
-  <!-- Chart.js from CDN -->
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-  <!-- Chart.js Zoom Plugin from CDN -->
-  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.2.0/dist/chartjs-plugin-zoom.min.js"></script>
-  <!-- Chart.js Datalabels Plugin from CDN -->
-  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0"></script>
-  <!-- sql.js from CDN -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.12.0/sql-wasm.js"></script>
-  <!-- GDD JS -->
-  <script src="gdd.js" defer></script>
+    <meta charset="UTF-8">
+    <title>Ambient Weather – Daily Avg Temp, Cumulative GDD, Daily Rain & Bud Break</title>
+    <!-- External CSS -->
+    <link rel="stylesheet" href="styles.css">
+    <!-- Chart.js from CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- Chart.js Zoom Plugin from CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.2.0/dist/chartjs-plugin-zoom.min.js"></script>
+    <!-- Chart.js Datalabels Plugin from CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0"></script>
+    <!-- sql.js from CDN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.12.0/sql-wasm.js"></script>
+    <!-- GDD JS -->
+    <script src="gdd.js" defer></script>
 </head>
 <body>
-  <h1>Robert Clay Vineyards</h1>
-  <h2>GDD 50 Data Dashboard</h2>
-  <h3>
+<h1>Robert Clay Vineyards</h1>
+<h2>GDD 50 Data Dashboard</h2>
+<h3>
     Data Sources:
     <a href="https://ambientweather.net/">ambientweather.net</a> &
     <a href="https://open-meteo.com/en/docs/historical-weather-api">Open-Meteo</a>
-  </h3>
-  <!-- Model Selection Dropdown -->
-  <div id="modelSelectContainer">
+</h3>
+<!-- Model Selection Dropdown -->
+<div id="modelSelectContainer">
     <label for="modelSelect">Prediction Model: </label>
     <select id="modelSelect">
-      <option value="linearDOYRegression" selected>Linear DOY Regression</option>
-      <option value="medianGDDEnsemble">Median GDD Ensemble</option>
-      <option value="mlMultivariateGDD">Extreme Heat Machine Learning</option>
+        <option value="historicalRegression"
+                title="Uses past bud break dates (with biofix dates) to predict the upcoming bud break based on historical trends."
+                selected>
+            Historical Regression Model
+        </option>
+        <option value="dynamicGDDProjection"
+                title="Adjusts the bud break forecast in real time by tracking the current year’s Growing Degree Days (GDD) and comparing them to historical thresholds.">
+            Dynamic GDD Projection
+        </option>
+        <option value="advancedMLForecast"
+                title="Employs a machine learning approach (using multiple factors like chill hours and current GDD) to produce a refined bud break prediction.">
+            Advanced ML Forecast
+        </option>
     </select>
-  </div>
-  <!-- Toggle buttons for slide-out panels -->
-  <button id="toggleLeftPanel">Toggle Months</button>
-  <button id="toggleRightPanel">Toggle Years</button>
-  <!-- Auto Refresh Toggle -->
-  <div id="autoRefreshControl">
+</div>
+<!-- Toggle buttons for slide-out panels -->
+<button id="toggleLeftPanel">Toggle Months</button>
+<button id="toggleRightPanel">Toggle Years</button>
+<!-- Auto Refresh Toggle -->
+<div id="autoRefreshControl">
     <label>
-      <input type="checkbox" id="autoRefreshCheckbox" checked>
-      Auto Refresh
+        <input type="checkbox" id="autoRefreshCheckbox" checked>
+        Auto Refresh
     </label>
-  </div>
-  <!-- Mode Dropdown and Threshold Input (hidden by default) -->
-  <div id="modeControl" style="text-align: center; margin: 10px 0;">
+</div>
+<!-- Mode Dropdown and Threshold Input (hidden by default) -->
+<div id="modeControl" style="text-align: center; margin: 10px 0;">
     <label for="modeSelect">Mode:</label>
     <select id="modeSelect">
-      <option value="normal" selected>Normal</option>
-      <option value="nearest">Nearest Neighbor</option>
-      <option value="greater">GDD > Current Year</option>
-      <option value="less">GDD < Current Year</option>
+        <option value="normal" selected>Normal</option>
+        <option value="nearest">Nearest Neighbor</option>
+        <option value="greater">GDD > Current Year</option>
+        <option value="less">GDD < Current Year</option>
     </select>
     <span id="thresholdContainer" style="display: none; margin-left: 10px;">
       <label for="nnThreshold">Threshold:</label>
       <input type="number" id="nnThreshold" value="10.0" step="0.1" style="width: 70px;">
     </span>
-  </div>
-  <div class="container">
+</div>
+<div class="container">
     <div class="flex-container">
-      <!-- Left slide-out panel for Month Filters -->
-      <div id="leftPanel">
-        <h3>Select Months</h3>
-        <div id="monthControls">
-          <label><input type="checkbox" id="allMonths" checked> All Months</label>
-          <label><input type="checkbox" name="month" value="1" checked> January</label>
-          <label><input type="checkbox" name="month" value="2" checked> February</label>
-          <label><input type="checkbox" name="month" value="3" checked> March</label>
-          <label><input type="checkbox" name="month" value="4" checked> April</label>
-          <label><input type="checkbox" name="month" value="5" checked> May</label>
-          <label><input type="checkbox" name="month" value="6" checked> June</label>
-          <label><input type="checkbox" name="month" value="7" checked> July</label>
-          <label><input type="checkbox" name="month" value="8" checked> August</label>
-          <label><input type="checkbox" name="month" value="9" checked> September</label>
-          <label><input type="checkbox" name="month" value="10" checked> October</label>
-          <label><input type="checkbox" name="month" value="11" checked> November</label>
-          <label><input type="checkbox" name="month" value="12" checked> December</label>
+        <!-- Left slide-out panel for Month Filters -->
+        <div id="leftPanel">
+            <h3>Select Months</h3>
+            <div id="monthControls">
+                <label><input type="checkbox" id="allMonths" checked> All Months</label>
+                <label><input type="checkbox" name="month" value="1" checked> January</label>
+                <label><input type="checkbox" name="month" value="2" checked> February</label>
+                <label><input type="checkbox" name="month" value="3" checked> March</label>
+                <label><input type="checkbox" name="month" value="4" checked> April</label>
+                <label><input type="checkbox" name="month" value="5" checked> May</label>
+                <label><input type="checkbox" name="month" value="6" checked> June</label>
+                <label><input type="checkbox" name="month" value="7" checked> July</label>
+                <label><input type="checkbox" name="month" value="8" checked> August</label>
+                <label><input type="checkbox" name="month" value="9" checked> September</label>
+                <label><input type="checkbox" name="month" value="10" checked> October</label>
+                <label><input type="checkbox" name="month" value="11" checked> November</label>
+                <label><input type="checkbox" name="month" value="12" checked> December</label>
+            </div>
+            <!-- Container for Grape Varietal legend items (left justified) -->
+            <div id="grapeVarietalLegend"></div>
         </div>
-        <!-- Container for Grape Varietal legend items (left justified) -->
-        <div id="grapeVarietalLegend"></div>
-      </div>
-      <!-- Chart Container -->
-      <div id="chartContainer">
-        <!-- Export to PNG Button in top right -->
-        <button id="exportButton"
-                style="position: absolute; top: 10px; right: 10px; z-index: 1000; padding: 10px 20px; font-size: 16px; cursor: pointer;">
-          Export Chart to PNG
-        </button>
-        <h2>Daily Avg Temp, Cumulative GDD, Daily Rain & Bud Break</h2>
-        <canvas id="dailyChart"></canvas>
-        <!-- Bottom legend container for non–grape–varietal groups -->
-        <div id="legendContainer"></div>
-      </div>
-      <!-- Right slide-out panel for Year Filters -->
-      <div id="rightPanel">
-        <h3>Select Years</h3>
-        <div id="yearControls">
-          <!-- Dynamic year checkboxes will be inserted here -->
+        <!-- Chart Container -->
+        <div id="chartContainer">
+            <!-- Export to PNG Button in top right -->
+            <button id="exportButton"
+                    style="position: absolute; top: 10px; right: 10px; z-index: 1000; padding: 10px 20px; font-size: 16px; cursor: pointer;">
+                Export Chart to PNG
+            </button>
+            <h2>Daily Avg Temp, Cumulative GDD, Daily Rain & Bud Break</h2>
+            <canvas id="dailyChart"></canvas>
+            <!-- Bottom legend container for non–grape–varietal groups -->
+            <div id="legendContainer"></div>
         </div>
-      </div>
+        <!-- Right slide-out panel for Year Filters -->
+        <div id="rightPanel">
+            <h3>Select Years</h3>
+            <div id="yearControls">
+                <!-- Dynamic year checkboxes will be inserted here -->
+            </div>
+        </div>
     </div>
-  </div>
-  <!-- Tooltip element for vertical line labels -->
-  <div id="vlineTooltip"></div>
+</div>
+<!-- Tooltip element for vertical line labels -->
+<div id="vlineTooltip"></div>
 </body>
 </html>

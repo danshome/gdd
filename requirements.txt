@@ -103,7 +103,7 @@ scikit-learn==1.6.1
 scipy==1.15.2
 scmrepo==3.3.10
 semver==3.0.4
-setuptools==75.8.0
+setuptools==78.1.1
 shellingham==1.5.4
 shortuuid==1.0.13
 shtab==1.7.1

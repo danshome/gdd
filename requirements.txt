@@ -93,7 +93,7 @@ pyparsing==3.2.1
 python-dateutil==2.9.0.post0
 pytz==2025.1
 PyYAML==6.0.2
-requests==2.32.3
+requests==2.32.4
 requests-cache==1.2.1
 retry-requests==2.0.0
 rich==13.9.4

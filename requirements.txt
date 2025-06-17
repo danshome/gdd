@@ -76,7 +76,7 @@ platformdirs==4.3.6
 prompt_toolkit==3.0.50
 propcache==0.3.0
 proto-plus==1.26.0
-protobuf==5.29.3
+protobuf==5.29.5
 psutil==7.0.0
 pyasn1==0.6.1
 pyasn1_modules==0.4.1

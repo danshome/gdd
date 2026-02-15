@@ -59,6 +59,7 @@ BUD_BREAK_START = None
 FORECAST_DAYS = None
 FORECAST_MODEL = None
 HISTORICAL_WINDOW_DAYS = None
+MAX_GAP_SECONDS = 6 * 3600  # 6 hours: gaps larger than this trigger Open-Meteo historical fetch
 
 # Base temperatures for GDD calculations
 BASE_TEMP_C = 10  # °C threshold for 5-minute cumulative GDD
@@ -747,6 +748,42 @@ def fetch_openmeteo_data(day_str: str) -> any:
     else:
         log("No Open-Meteo data received.")
         return None
+
+
+def insert_openmeteo_historical(cursor: sqlite3.Cursor, conn: sqlite3.Connection, day_str: str) -> int:
+    """
+    Fetches hourly historical data from Open-Meteo for a given day and inserts
+    readings into the database. Uses INSERT OR IGNORE so real station data is
+    never overwritten.
+
+    Returns the number of rows inserted.
+    """
+    df = fetch_openmeteo_data(day_str)
+    if df is None or df.empty:
+        log(f"No Open-Meteo historical data available for {day_str}.")
+        return 0
+    inserted = 0
+    for _, row in df.iterrows():
+        dt_om = row["date"]
+        ts = int(dt_om.timestamp())
+        date_str = dt_om.isoformat() + "Z"
+        tempf = row["tempf"]
+        if pd.isna(tempf):
+            continue
+        try:
+            cursor.execute("""
+                INSERT OR IGNORE INTO readings
+                (dateutc, date, tempf, gdd, gdd_hourly, gdd_daily, is_generated, mac_source)
+                VALUES (?, ?, ?, 0, 0, 0, 1, ?)
+            """, (ts, date_str, float(tempf), "OPENMETEO"))
+            if cursor.rowcount > 0:
+                inserted += 1
+        except Exception as ex:
+            log(f"Error inserting Open-Meteo historical reading for {date_str}: {ex}")
+    conn.commit()
+    if inserted > 0:
+        log(f"Open-Meteo historical: inserted {inserted} hourly readings for {day_str}.")
+    return inserted
 
 
 def fetch_openmeteo_forecast() -> any:

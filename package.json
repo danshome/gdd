@@ -1,0 +1,5 @@
+{
+  "private": true,
+  "description": "Playwright browser install only — no JS build tooling",
+  "devDependencies": {}
+}

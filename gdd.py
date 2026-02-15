@@ -1555,6 +1555,16 @@ def main() -> None:
                 log(f"No backup data received for {day_str}.")
 
         if valid_count < 287:
+            log(f"{day_str}: Only {valid_count} valid readings after primary/backup. Trying Open-Meteo historical.")
+            om_inserted = insert_openmeteo_historical(cursor, conn, day_str)
+            if om_inserted > 0:
+                try:
+                    cursor.execute("SELECT COUNT(*) FROM readings WHERE substr(date,1,10)=? AND tempf IS NOT NULL",
+                                   (day_str,))
+                    valid_count = cursor.fetchone()[0]
+                except sqlite3.Error as e:
+                    log(f"Error fetching valid count after Open-Meteo for {day_str}: {e}")
+        if valid_count < 287:
             log(f"{day_str}: Only {valid_count} valid readings after all fallbacks. Filling gaps via interpolation.")
             fill_missing_data_by_gap(cursor, conn, day_str)
         else:

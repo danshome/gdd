@@ -859,6 +859,62 @@ def fill_missing_data_by_gap(cursor: sqlite3.Cursor, conn: sqlite3.Connection, d
         if snapped not in available:
             available[snapped] = temp
 
+    # Cross-midnight anchors: fetch boundary readings from adjacent days
+    # These participate in interpolation but don't generate new rows themselves
+    anchor_timestamps = set()
+    prev_row = None
+    next_row = None
+    try:
+        # Last reading before this day's midnight (from previous day)
+        cursor.execute(
+            "SELECT dateutc, tempf FROM readings WHERE dateutc < ? AND tempf IS NOT NULL ORDER BY dateutc DESC LIMIT 1",
+            (expected_start,)
+        )
+        prev_row = cursor.fetchone()
+        if prev_row:
+            available[prev_row[0]] = prev_row[1]
+            anchor_timestamps.add(prev_row[0])
+        # First reading after this day ends (from next day)
+        cursor.execute(
+            "SELECT dateutc, tempf FROM readings WHERE dateutc > ? AND tempf IS NOT NULL ORDER BY dateutc ASC LIMIT 1",
+            (expected_end,)
+        )
+        next_row = cursor.fetchone()
+        if next_row:
+            available[next_row[0]] = next_row[1]
+            anchor_timestamps.add(next_row[0])
+    except sqlite3.Error as e:
+        log(f"Error fetching cross-midnight anchors for {day_str}: {e}")
+
+    # Gap-size analysis: if the largest consecutive gap exceeds MAX_GAP_SECONDS,
+    # fetch Open-Meteo hourly data to add intermediate anchor points
+    sorted_ts = sorted(available.keys())
+    if len(sorted_ts) >= 2:
+        max_gap = max(sorted_ts[i + 1] - sorted_ts[i] for i in range(len(sorted_ts) - 1))
+        if max_gap > MAX_GAP_SECONDS:
+            log(f"{day_str}: Largest gap is {max_gap}s (>{MAX_GAP_SECONDS}s). Fetching Open-Meteo historical data.")
+            om_count = insert_openmeteo_historical(cursor, conn, day_str)
+            if om_count > 0:
+                # Rebuild available dict with the new Open-Meteo readings
+                cursor.execute(
+                    "SELECT dateutc, tempf FROM readings WHERE substr(date, 1, 10)=? ORDER BY dateutc ASC",
+                    (day_str,)
+                )
+                rows = cursor.fetchall()
+                available = {}
+                for ts, temp in rows:
+                    snapped = expected_start + ((ts - expected_start) // 300) * 300
+                    if snapped not in available:
+                        available[snapped] = temp
+                # Re-add cross-midnight anchors
+                anchor_timestamps = set()
+                if prev_row:
+                    available[prev_row[0]] = prev_row[1]
+                    anchor_timestamps.add(prev_row[0])
+                if next_row:
+                    available[next_row[0]] = next_row[1]
+                    anchor_timestamps.add(next_row[0])
+
     grid_points = sorted(available.keys())
     for point in expected_points:
         if point in available:

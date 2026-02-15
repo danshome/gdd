@@ -126,6 +126,34 @@ This project includes an optional GitHub Actions workflow (`CI.yml`) for automat
    - Set the file path: `dvc remote modify --local myremote gdrive_service_account_json_file_path service_account.json`
    - Specify the user email: `dvc remote modify myremote gdrive_service_account_user_email your-email@example.com`
 
+### Local Google Drive Filesystem (Alternative to API)
+
+If you encounter authentication issues with the Google Drive API (e.g., "This app is blocked"), you can bypass the API entirely by using the Google Drive desktop app to sync the DVC storage folder locally. DVC will read and write files from the local path, and the Google Drive app handles cloud syncing in the background.
+
+1. *Install Google Drive Desktop App*:
+   - Install [Google Drive for Desktop](https://www.google.com/drive/download/) and sign in.
+   - The DVC storage folder will sync to a local path (typically `~/Library/CloudStorage/GoogleDrive-<email>/My Drive/...` on Mac).
+
+2. *Add a Local DVC Remote*:
+   ```bash
+   dvc remote add --default localdrive /path/to/google-drive-synced/dvc-storage
+   ```
+   Replace the path with the actual local path where Google Drive syncs the DVC storage folder.
+
+3. *Pull and Push Using Local Files*:
+   ```bash
+   dvc pull    # reads from the local synced folder
+   dvc push    # writes to the local synced folder, Google Drive app syncs to cloud
+   ```
+
+4. *Switch Back to API Remote*:
+   If you need to revert to the API-based remote:
+   ```bash
+   dvc remote default myremote
+   ```
+
+This approach avoids all Google Drive API authentication and quota issues for local development. The existing `myremote` configuration is preserved and can still be used for CI/CD with a service account.
+
 ### GitHub Secrets (Optional)
 
 For CI, add these secrets in your GitHub repository settings (`Settings > Secrets and variables > Actions > Secrets`):

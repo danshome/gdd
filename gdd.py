@@ -40,25 +40,25 @@ SUNSPOT_CSV = "SN_d_tot_V2.0.csv"
 VINEYARD_PESTS_CSV = "vineyard_pests.csv"
 
 # Global variables (populated by reload_config)
-DB_FILENAME = None
-RETRY_SLEEP_TIME = None
-RATE_LIMIT_DELAY = None
-API_CALL_DELAY = None
+DB_FILENAME = "ambient_weather.sqlite"
+RETRY_SLEEP_TIME = 10.0
+RATE_LIMIT_DELAY = 0.34
+API_CALL_DELAY = 1.0
 DEBUG = False
-RECALC_INTERVAL = None
-MAC_ADDRESS = None
-API_KEY = None
-APPLICATION_KEY = None
-BACKUP_MAC_ADDRESS = None
-URL_TEMPLATE = None
-START_DATE = None
-CURRENT_DATE = None
-OPENMETEO_LAT = None
-OPENMETEO_LON = None
-BUD_BREAK_START = None
-FORECAST_DAYS = None
-FORECAST_MODEL = None
-HISTORICAL_WINDOW_DAYS = None
+RECALC_INTERVAL = 300
+MAC_ADDRESS = ""
+API_KEY = ""
+APPLICATION_KEY = ""
+BACKUP_MAC_ADDRESS = ""
+URL_TEMPLATE = ""
+START_DATE = datetime(2000, 1, 1)
+CURRENT_DATE = datetime.now(timezone.utc).date()
+OPENMETEO_LAT = 0.0
+OPENMETEO_LON = 0.0
+BUD_BREAK_START = datetime(datetime.now(timezone.utc).year, 1, 1).date()
+FORECAST_DAYS = 14
+FORECAST_MODEL = "best_match"
+HISTORICAL_WINDOW_DAYS = 14
 MAX_GAP_SECONDS = 6 * 3600  # 6 hours: gaps larger than this trigger Open-Meteo historical fetch
 
 # Base temperatures for GDD calculations
@@ -172,7 +172,7 @@ def reload_config() -> None:
 
     try:
         BUD_BREAK_START = datetime.strptime(config.get('date', 'bud_break_start'), "%Y-%m-%d").date()
-    except Exception:
+    except (ValueError, configparser.NoOptionError):
         BUD_BREAK_START = datetime(datetime.now(timezone.utc).year, 1, 1).date()
 
     # Open-Meteo configuration (fallback)
@@ -347,7 +347,6 @@ def import_grapevine_csv(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -> No
     Imports data from the Grapevine CSV file into the grapevine_gdd table.
     Uses an UPSERT so that an existing biofix_date is preserved.
     """
-    required_headers = ['variety', 'heat_summation']
     try:
         with open(GRAPEVINE_CSV, "r", newline='') as csvfile:
             reader = csv.reader(csvfile)
@@ -452,42 +451,42 @@ def import_sunspots_data(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -> No
             csv_data = f.read()
         csvfile = StringIO(csv_data)
         reader = csv.reader(csvfile, delimiter=";")
-        header = next(reader)  # Skip header row
+        next(reader)  # Skip header row
         for row in reader:
             if len(row) < 8:
                 continue
             try:
                 year = int(row[0])
-            except Exception:
+            except (ValueError, IndexError):
                 continue
             if year < 2010:
                 continue
             try:
                 month = int(row[1])
                 day = int(row[2])
-            except Exception:
+            except (ValueError, IndexError):
                 continue
             try:
                 fraction = float(row[3])
-            except Exception:
+            except (ValueError, IndexError):
                 fraction = None
             try:
                 daily_total = int(row[4])
                 if daily_total == -1:
                     daily_total = None
-            except Exception:
+            except (ValueError, IndexError):
                 daily_total = None
             try:
                 std_dev = float(row[5])
-            except Exception:
+            except (ValueError, IndexError):
                 std_dev = None
             try:
                 num_obs = int(row[6])
-            except Exception:
+            except (ValueError, IndexError):
                 num_obs = None
             try:
                 definitive = int(row[7])
-            except Exception:
+            except (ValueError, IndexError):
                 definitive = None
             date_str = f"{year:04d}-{month:02d}-{day:02d}"
             execute_sql(cursor, """
@@ -521,10 +520,10 @@ def recalc_varietal_gdd(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -> Non
                 continue
             try:
                 temp = float(tempf)
-            except Exception:
+            except (ValueError, TypeError):
                 continue
             temp_c = (temp - 32) * 5 / 9
-            inc = max(0, temp_c - BASE_TEMP_C) / 288
+            inc = max(0.0, temp_c - BASE_TEMP_C) / 288
             cumulative += inc
         execute_sql(cursor, "UPDATE grapevine_gdd SET gdd = ? WHERE variety = ?", (cumulative, variety))
         log(f"Updated {variety}: biofix_date={biofix_date}, accumulated GDD={cumulative:.3f}")
@@ -577,11 +576,11 @@ def recalc_gdd(cursor: sqlite3.Cursor, conn: sqlite3.Connection, full: bool = Fa
                     continue
                 try:
                     val = float(tempf)
-                except Exception as e:
+                except (ValueError, TypeError):
                     log(f"Skipping record {dateutc} due to invalid tempf: {tempf}")
                     continue
                 temp_c = (val - 32) * 5 / 9
-                inc = max(0, (temp_c - BASE_TEMP_C)) / 288
+                inc = max(0.0, (temp_c - BASE_TEMP_C)) / 288
                 cumulative_gdd += inc
                 execute_sql(cursor, "UPDATE readings SET gdd = ? WHERE dateutc = ?", (cumulative_gdd, dateutc))
         except sqlite3.Error as e:
@@ -632,7 +631,7 @@ def calculate_avg_daily_gdd(cursor: sqlite3.Cursor, years: list, current_date: d
     return sum(rates) / len(rates) if rates else 2.0
 
 
-def fetch_day_data(mac_address: str, end_date: str) -> any:
+def fetch_day_data(mac_address: str, end_date: str) -> list | None:
     url = URL_TEMPLATE.format(
         mac_address=mac_address,
         api_key=API_KEY,
@@ -703,22 +702,18 @@ def fetch_day_data(mac_address: str, end_date: str) -> any:
         return response.json()
 
 
-def fetch_openmeteo_data(day_str: str) -> any:
+def fetch_openmeteo_data(day_str: str) -> pd.DataFrame | None:
     try:
         import openmeteo_requests
-        import requests_cache
-        from retry_requests import retry
     except ImportError:
-        log("Open-Meteo packages not installed. Please install openmeteo_requests, requests_cache, and retry_requests.")
+        log("Open-Meteo packages not installed. Please install openmeteo_requests.")
         return None
 
     start_date = day_str
     dt = datetime.strptime(day_str, "%Y-%m-%d")
     end_date = (dt + timedelta(days=1)).strftime("%Y-%m-%d")
 
-    cache_session = requests_cache.CachedSession('.cache', expire_after=-1)
-    retry_session = retry(cache_session, retries=5, backoff_factor=0.2)
-    openmeteo = openmeteo_requests.Client(session=retry_session)
+    openmeteo = openmeteo_requests.Client()
 
     url = "https://archive-api.open-meteo.com/v1/archive"
     params = {
@@ -732,7 +727,11 @@ def fetch_openmeteo_data(day_str: str) -> any:
         "precipitation_unit": "inch"
     }
     log(f"Calling Open-Meteo API URL: {url} with params: {params}")
-    responses = openmeteo.weather_api(url, params=params)
+    try:
+        responses = openmeteo.weather_api(url, params=params)
+    except openmeteo_requests.OpenMeteoRequestsError as e:
+        log(f"Open-Meteo historical API request failed: {e}")
+        return None
     if responses:
         response = responses[0]
         hourly = response.Hourly()
@@ -786,18 +785,14 @@ def insert_openmeteo_historical(cursor: sqlite3.Cursor, conn: sqlite3.Connection
     return inserted
 
 
-def fetch_openmeteo_forecast() -> any:
+def fetch_openmeteo_forecast() -> pd.DataFrame | None:
     try:
         import openmeteo_requests
-        import requests_cache
-        from retry_requests import retry
     except ImportError:
-        log("Open-Meteo packages not installed. Please install openmeteo_requests, requests_cache, and retry_requests.")
+        log("Open-Meteo packages not installed. Please install openmeteo_requests.")
         return None
 
-    cache_session = requests_cache.CachedSession('.cache', expire_after=3600)
-    retry_session = retry(cache_session, retries=5, backoff_factor=0.2)
-    openmeteo = openmeteo_requests.Client(session=retry_session)
+    openmeteo = openmeteo_requests.Client()
 
     url = "https://api.open-meteo.com/v1/forecast"
     params = {
@@ -812,7 +807,11 @@ def fetch_openmeteo_forecast() -> any:
         "forecast_days": FORECAST_DAYS
     }
     log(f"Fetching hourly forecast data from Open-Meteo with params: {params}")
-    responses = openmeteo.weather_api(url, params=params)
+    try:
+        responses = openmeteo.weather_api(url, params=params)
+    except openmeteo_requests.OpenMeteoRequestsError as e:
+        log(f"Open-Meteo forecast API request failed: {e}")
+        return None
     if responses:
         response = responses[0]
         hourly = response.Hourly()
@@ -1026,7 +1025,7 @@ def project_bud_break_regression(cursor: sqlite3.Cursor, conn: sqlite3.Connectio
             biofix_date = f"{current_year}-01-01"
         try:
             bd_dt = datetime.strptime(biofix_date, "%Y-%m-%d")
-        except Exception as ex:
+        except ValueError:
             bd_dt = datetime(current_year, 1, 1)
         biofix_md = bd_dt.strftime("%m-%d")
         data_points = []
@@ -1055,7 +1054,7 @@ def project_bud_break_regression(cursor: sqlite3.Cursor, conn: sqlite3.Connectio
         slope = numerator / denominator if denominator != 0 else 0
         intercept = mean_doy - slope * mean_year
         predicted_doy = slope * current_year + intercept
-        predicted_doy = max(1, min(366, predicted_doy))
+        predicted_doy = int(max(1.0, min(366.0, predicted_doy)))
         predicted_date = (datetime(current_year, 1, 1) + timedelta(days=predicted_doy - 1)).date()
 
         execute_sql(cursor, f"""
@@ -1129,6 +1128,8 @@ def project_bud_break_hybrid(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -
         total_gdd = current_gdd + forecast_gdd
 
         remaining_gdd = max(0, target_gdd - total_gdd)
+        avg_daily_gdd = 2.0
+        days_remaining = 0.0
         if remaining_gdd == 0:
             cursor.execute(
                 "SELECT date FROM readings WHERE substr(date, 1, 4)=? AND gdd >= ? ORDER BY date ASC LIMIT 1",
@@ -1228,34 +1229,24 @@ def project_bud_break_ehml(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -> 
     log(f"Found {len(varieties_data)} varieties.")
 
     # Helper functions
-    def calculate_daily_chill_hours(cursor, date):
-        date_str = date.strftime('%Y-%m-%d')
-        next_day_str = (date + timedelta(days=1)).strftime('%Y-%m-%d')
+    def calculate_full_season_chill_hours(yr):
+        start_date = datetime(yr - 1, 9, 1).strftime('%Y-%m-%d')
+        end_date = datetime(yr, 3, 1).strftime('%Y-%m-%d')
         cursor.execute("""
-            SELECT COUNT(*) FROM readings 
-            WHERE date >= ? AND date < ? AND (CAST(tempf AS REAL) - 32) * 5.0 / 9.0 BETWEEN 0 AND 7
-        """, (date_str, next_day_str))
-        count = cursor.fetchone()[0]
-        return count * 5 / 3600
-
-    def calculate_full_season_chill_hours(year):
-        start_date = datetime(year - 1, 9, 1).strftime('%Y-%m-%d')
-        end_date = datetime(year, 3, 1).strftime('%Y-%m-%d')
-        cursor.execute("""
-            SELECT COUNT(*) FROM readings 
+            SELECT COUNT(*) FROM readings
             WHERE date >= ? AND date < ? AND (CAST(tempf AS REAL) - 32) * 5.0 / 9.0 BETWEEN 0 AND 7
         """, (start_date, end_date))
-        count = cursor.fetchone()[0]
-        return count * 5 / 3600
+        n = cursor.fetchone()[0]
+        return n * 5 / 3600
 
-    def calculate_daily_gdd(cursor, date):
-        date_str = date.strftime('%Y-%m-%d')
-        next_day_str = (date + timedelta(days=1)).strftime('%Y-%m-%d')
-        cursor.execute("""
-            SELECT AVG(CAST(tempf AS REAL)) FROM readings 
+    def calculate_daily_gdd(db_cursor, target_date):
+        date_str = target_date.strftime('%Y-%m-%d')
+        next_day_str = (target_date + timedelta(days=1)).strftime('%Y-%m-%d')
+        db_cursor.execute("""
+            SELECT AVG(CAST(tempf AS REAL)) FROM readings
             WHERE date >= ? AND date < ?
         """, (date_str, next_day_str))
-        avg_temp_f = cursor.fetchone()[0] or 0
+        avg_temp_f = db_cursor.fetchone()[0] or 0
         avg_temp_c = (avg_temp_f - 32) * 5 / 9
         return max(0, avg_temp_c - 10)
 
@@ -1285,7 +1276,7 @@ def project_bud_break_ehml(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -> 
     log(f"Estimated current chill hours: {current_year_chill_hours:.2f}")
 
     log("Preparing training data.")
-    X_train, y_train = [], []
+    x_train, y_train = [], []
     varieties_to_process = [(v, t) for v, t in varieties_data if t is not None]
     for variety, target_gdd in varieties_to_process:
         for year in historical_years:
@@ -1297,7 +1288,7 @@ def project_bud_break_ehml(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -> 
             row = cursor.fetchone()
             if row:
                 current_gdd, doy, chill_hours, mean_gdd, std_gdd, remaining_gdd = row
-                X_train.append([current_gdd, doy, chill_hours, mean_gdd, std_gdd, target_gdd])
+                x_train.append([current_gdd, doy, chill_hours, mean_gdd, std_gdd, target_gdd])
                 y_train.append(remaining_gdd)
                 continue
 
@@ -1309,7 +1300,6 @@ def project_bud_break_ehml(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -> 
             row = cursor.fetchone()
             if not row:
                 continue
-            bud_break_date = datetime.fromisoformat(row[0].rstrip("Z"))
             bud_break_gdd = row[1]
 
             past_date = datetime(year, current_date.month, current_date.day)
@@ -1334,7 +1324,7 @@ def project_bud_break_ehml(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -> 
 
             features = [current_gdd, doy, chill_hours, mean_gdd, std_gdd, target_gdd]
             remaining_gdd = bud_break_gdd - current_gdd
-            X_train.append(features)
+            x_train.append(features)
             y_train.append(remaining_gdd)
 
             cursor.execute("""
@@ -1349,16 +1339,16 @@ def project_bud_break_ehml(cursor: sqlite3.Cursor, conn: sqlite3.Connection) -> 
         with open(model_file, 'rb') as f:
             model = pickle.load(f)
     else:
-        if not X_train:
+        if not x_train:
             log("Error: No training data.")
             return
-        X_train = np.array(X_train)
+        x_train = np.array(x_train)
         y_train = np.array(y_train)
         model = xgb.XGBRegressor(objective='reg:squarederror', n_estimators=50, max_depth=3)
-        model.fit(X_train, y_train)
+        model.fit(x_train, y_train)
         with open(model_file, 'wb') as f:
             pickle.dump(model, f)
-        cv_scores = cross_val_score(model, X_train, y_train, cv=5, scoring='neg_mean_squared_error')
+        cv_scores = cross_val_score(model, x_train, y_train, cv=5, scoring='neg_mean_squared_error')
         log(f"Cross-validation MSE: {-np.mean(cv_scores):.2f}")
 
     log("Starting predictions.")
@@ -1459,7 +1449,7 @@ def main() -> None:
                     tempf = values.get("tempf")
                     try:
                         numeric_tempf = float(tempf) if tempf is not None else None
-                    except Exception as e:
+                    except (ValueError, TypeError):
                         log(f"Skipping reading at {values.get('date')} due to invalid tempf: {tempf}")
                         continue
                     if numeric_tempf is None:
